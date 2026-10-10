@@ -1,5 +1,5 @@
-import { Assessment, Candidate, CandidateResult, Question, SystemSettings, UserRole, ProctoringViolation } from '../types';
-import { initialSettings, sampleAssessments, sampleCandidateResults, sampleCandidates, sampleQuestions } from './mockData';
+import { Assessment, Candidate, CandidateResult, LiveCandidate, Portal, Question, SystemSettings, ProctoringViolation } from '../types';
+import { initialSettings, sampleAssessments, sampleCandidateResults, sampleCandidates, sampleLiveCandidates, sampleQuestions } from './mockData';
 import { authApi, AuthUser, CandidateSession } from './authApi';
 
 export interface CandidateFeedback {
@@ -9,20 +9,11 @@ export interface CandidateFeedback {
   submittedAt: string;
 }
 
-export interface StaffAccount {
-  id?: string;
-  name: string;
-  email: string;
-  role: UserRole;
-  registeredAt: string;
-}
-
 export interface AppState {
-  currentRole: UserRole;
-  isAuthenticatedAdminRecruiter: boolean;
-  // Verified server-side identity (JWT session). Roles/workspaces come from the backend, not the UI.
+  isStaffAuthenticated: boolean;
+  // Verified server-side identity (JWT session). Roles/portals come from the backend, not the UI.
   currentUser: AuthUser | null;
-  allowedRoles: UserRole[];
+  allowedPortals: Portal[];
   // True once the first "restore session from refresh cookie" attempt has finished.
   authReady: boolean;
   // Invite token from the candidate's link (?invite=...) - exchanged for a candidate JWT after OTP.
@@ -33,7 +24,7 @@ export interface AppState {
   candidates: Candidate[];
   candidateResults: Record<string, CandidateResult>;
   questionBank: Question[];
-  staffAccounts: StaffAccount[];
+  liveCandidates: LiveCandidate[];
   
   // Active Candidate Exam Flow State
   activeCandidateId: string | null;
@@ -67,13 +58,12 @@ class Store {
 
   constructor() {
     this.state = {
-      currentRole: 'Candidate',
-      isAuthenticatedAdminRecruiter: false,
+      isStaffAuthenticated: false,
       currentUser: null,
-      allowedRoles: [],
+      allowedPortals: [],
       authReady: false,
       candidateInviteToken: new URLSearchParams(window.location.search).get('invite'),
-      staffAccounts: [],
+      liveCandidates: sampleLiveCandidates.map(c => ({ ...c })),
       settings: { ...initialSettings },
       assessments: [...sampleAssessments],
       activeAssessmentId: sampleAssessments[0].id,
@@ -132,6 +122,11 @@ class Store {
     this.listeners.forEach(l => l());
   }
 
+  /** Ask the app to re-render (e.g. after navigation state outside the store changed). */
+  public refresh() {
+    this.notify();
+  }
+
   // Camera & Mic MediaStream Track Management
   public registerMediaStream(stream: MediaStream) {
     if (stream && !this.activeStreams.includes(stream)) {
@@ -156,68 +151,61 @@ class Store {
   // Authentication (state mirrors the server-verified JWT session; the backend
   // enforces every permission, this only drives what the UI shows).
   // ---------------------------------------------------------------------------
-  private defaultWorkspace(workspaces: UserRole[]): UserRole {
-    return (['Admin', 'Recruiter', 'Super Admin'] as UserRole[]).find(r => workspaces.includes(r)) || 'Candidate';
+  /** Apply a verified staff session (also used to refresh the user after a password change). */
+  public loginStaff(user: AuthUser) {
+    this.state.currentUser = user;
+    this.state.allowedPortals = user.portals;
+    this.state.isStaffAuthenticated = true;
+    this.notify();
+    if (!user.mustChangePassword) void this.loadPolicy('staff');
   }
 
-  /** Apply a verified staff session. `preferredRole` is honoured only if the server allows it. */
-  public loginAdminRecruiter(user: AuthUser, preferredRole?: UserRole) {
-    this.state.currentUser = user;
-    this.state.allowedRoles = user.workspaces;
-    this.state.isAuthenticatedAdminRecruiter = true;
-    this.state.currentRole =
-      preferredRole && user.workspaces.includes(preferredRole) ? preferredRole : this.defaultWorkspace(user.workspaces);
-    this.notify();
+  private policyLoading = false;
+
+  /**
+   * Pull the proctoring + assessment policy the System Admin saved (Settings screen) into state.settings, so the
+   * exam, proctoring and invitation screens follow the real rules. On failure the defaults already in state stay.
+   */
+  public async loadPolicy(mode: 'staff' | 'candidate'): Promise<void> {
+    if (this.policyLoading) return;
+    this.policyLoading = true;
+    try {
+      const [proctoring, assessment] = await Promise.all([
+        authApi.fetchJson<Partial<SystemSettings>>('/policy/proctoring', 'GET', undefined, mode),
+        authApi.fetchJson<Partial<SystemSettings>>('/policy/assessment', 'GET', undefined, mode),
+      ]);
+      this.state.settings = { ...this.state.settings, ...proctoring, ...assessment };
+      this.notify();
+    } catch {
+      /* keep the defaults */
+    } finally {
+      this.policyLoading = false;
+    }
   }
 
   public markAuthReady() {
-    if (!this.state.authReady) {
-      this.state.authReady = true;
+    this.setAuthReady(true);
+  }
+
+  public setAuthReady(ready: boolean) {
+    if (this.state.authReady !== ready) {
+      this.state.authReady = ready;
       this.notify();
     }
   }
 
   private clearStaffSession() {
-    this.state.isAuthenticatedAdminRecruiter = false;
+    this.state.isStaffAuthenticated = false;
     this.state.currentUser = null;
-    this.state.allowedRoles = [];
-    this.state.staffAccounts = [];
-    this.state.currentRole = 'Candidate';
+    this.state.allowedPortals = [];
     this.notify();
   }
 
-  public async logoutAdminRecruiter() {
+  public async logoutStaff() {
     try {
       await authApi.logout();
     } finally {
       this.clearStaffSession(); // the UI always signs out, even if the request failed
-    }
-  }
-
-  public setRole(role: UserRole) {
-    if (role === 'Candidate') {
-      this.state.currentRole = 'Candidate';
-      this.notify();
-    } else if (this.state.isAuthenticatedAdminRecruiter && this.state.allowedRoles.includes(role)) {
-      this.state.currentRole = role;
-      this.notify();
-    }
-  }
-
-  /** Admin+ only (server enforced): load staff accounts for the Admin portal table. */
-  public async loadStaffAccounts() {
-    try {
-      const users = await authApi.listStaff();
-      this.state.staffAccounts = users.map(u => ({
-        id: u.id,
-        name: u.name,
-        email: u.email,
-        role: u.role,
-        registeredAt: (u.createdAt || '').split('T')[0]
-      }));
-      this.notify();
-    } catch {
-      // 403 for non-admins / network issues: leave the list empty
     }
   }
 
@@ -229,6 +217,7 @@ class Store {
     }
     this.state.otpVerified = true;
     this.notify();
+    void this.loadPolicy('candidate');
   }
 
   public updateSettings(newSettings: Partial<SystemSettings>) {
@@ -508,6 +497,8 @@ class Store {
       targetSection = {
         id: `sec-${Date.now()}`,
         name: sectionIdOrName,
+        description: '',
+        isMandatory: true,
         instructions: `Complete all questions in ${sectionIdOrName}.`,
         timeLimitMinutes: 15,
         passingMarks: question.points || 20,

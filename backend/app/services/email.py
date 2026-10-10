@@ -1,47 +1,116 @@
 import logging
 import smtplib
+import socket
+import ssl
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.utils import formataddr
 from html import escape
-from typing import Optional
+from typing import Optional, Tuple
 
-from app.core.config import settings
+from app.services import runtime_settings as rt
 
 logger = logging.getLogger("nexus.email")
 
+SMTP_TIMEOUT_SECONDS = 12
+
+
+def _explain(exc: Exception) -> str:
+    """A short, safe explanation for the admin (never includes the password or server banner text)."""
+    if isinstance(exc, smtplib.SMTPAuthenticationError):
+        return "The SMTP server rejected the sender address / password. For Gmail use a 16-character App Password."
+    if isinstance(exc, smtplib.SMTPSenderRefused):
+        return "The SMTP server refused the sender address."
+    if isinstance(exc, smtplib.SMTPRecipientsRefused):
+        return "The SMTP server refused the recipient address."
+    if isinstance(exc, (socket.timeout, TimeoutError)):
+        return "The SMTP server did not answer in time. Check the host and port."
+    if isinstance(exc, socket.gaierror):
+        return "The SMTP host name could not be found."
+    if isinstance(exc, (ConnectionError, OSError, smtplib.SMTPConnectError, smtplib.SMTPServerDisconnected)):
+        return "Could not connect to the SMTP server. Check the host and port."
+    if isinstance(exc, ssl.SSLError):
+        return "A secure (TLS) connection to the SMTP server could not be established."
+    return "The email could not be sent (see the server log)."
+
+
+def _open_session(host: str, port: int, sender: str, password: str) -> smtplib.SMTP:
+    """Connect, secure the channel and sign in. The caller must quit() the returned session."""
+    if port == 465:  # implicit TLS
+        server = smtplib.SMTP_SSL(host, port, timeout=SMTP_TIMEOUT_SECONDS, context=ssl.create_default_context())
+        server.ehlo()
+    else:  # STARTTLS (587 / 25)
+        server = smtplib.SMTP(host, port, timeout=SMTP_TIMEOUT_SECONDS)
+        server.ehlo()
+        server.starttls(context=ssl.create_default_context())
+        server.ehlo()
+    try:
+        server.login(sender, password)
+    except Exception:
+        _quietly_quit(server)
+        raise
+    return server
+
+
+def _quietly_quit(server: smtplib.SMTP) -> None:
+    try:
+        server.quit()
+    except Exception:
+        pass
+
+
+def send_email_detailed(to_email: str, subject: str, body_html: str,
+                        sender_email: Optional[str] = None, app_password: Optional[str] = None,
+                        host: Optional[str] = None, port: Optional[int] = None) -> Tuple[bool, str]:
+    """
+    Send an HTML email through the gateway configured by the System Admin (database, then .env fallback).
+    Never raises. Returns (ok, message) where message is a safe explanation when ok is False.
+    """
+    cfg = rt.email_config()
+    sender = sender_email or cfg.sender_email
+    password = (app_password or cfg.password or "").replace(" ", "")
+    host = host or cfg.host
+    port = port or cfg.port
+    if not sender or not password:
+        logger.warning("SMTP credentials missing - email to %s not sent", to_email)
+        return False, "No sender address or SMTP password is configured (System Admin > Settings > Email)."
+
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = formataddr((cfg.sender_name, sender))
+        msg["To"] = to_email
+        msg.attach(MIMEText(body_html, "html"))
+
+        server = _open_session(host, port, sender, password)
+        try:
+            server.sendmail(sender, [to_email], msg.as_string())
+        finally:
+            _quietly_quit(server)
+        return True, "Email sent."
+    except Exception as exc:  # network / auth problems must not break the API
+        logger.error("Email delivery to %s failed: %s: %s", to_email, type(exc).__name__, exc)
+        return False, _explain(exc)
+
+
+def probe_gateway() -> Tuple[bool, str]:
+    """Check the saved gateway (connect, TLS, sign in) WITHOUT sending anything. Never raises."""
+    cfg = rt.email_config()
+    password = (cfg.password or "").replace(" ", "")
+    if not cfg.sender_email or not password:
+        return False, "No sender address or SMTP password is configured (System Admin > Settings > Email)."
+    try:
+        _quietly_quit(_open_session(cfg.host, cfg.port, cfg.sender_email, password))
+        return True, f"Connected to {cfg.host}:{cfg.port} and signed in as {cfg.sender_email}."
+    except Exception as exc:
+        logger.error("SMTP probe of %s:%s failed: %s: %s", cfg.host, cfg.port, type(exc).__name__, exc)
+        return False, _explain(exc)
 
 def send_email(to_email: str, subject: str, body_html: str,
                sender_email: Optional[str] = None, app_password: Optional[str] = None,
                host: Optional[str] = None, port: Optional[int] = None) -> bool:
-    """Send an HTML email over SMTP (STARTTLS). Never raises; returns True on success."""
-    sender = sender_email or settings.GMAIL_SENDER_EMAIL
-    password = (app_password or settings.GMAIL_APP_PASSWORD or "").replace(" ", "")
-    if not sender or not password:
-        logger.warning("SMTP credentials missing - email to %s not sent", to_email)
-        return False
-    try:
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = subject
-        msg["From"] = f"NexusAssess Evaluation Platform <{sender}>"
-        msg["To"] = to_email
-        msg.attach(MIMEText(body_html, "html"))
-
-        server = smtplib.SMTP(host or settings.SMTP_HOST, port or settings.SMTP_PORT, timeout=12)
-        try:
-            server.ehlo()
-            server.starttls()
-            server.login(sender, password)
-            server.sendmail(sender, [to_email], msg.as_string())
-        finally:
-            try:
-                server.quit()
-            except Exception:
-                pass
-        return True
-    except Exception as exc:  # network / auth problems must not break the API
-        logger.error("Email delivery to %s failed: %s", to_email, exc)
-        return False
-
+    """Fire-and-forget variant: True on success, False on any failure. Never raises."""
+    return send_email_detailed(to_email, subject, body_html, sender_email, app_password, host, port)[0]
 
 # ----------------------------------------------------------------- templates
 def _shell(title: str, inner: str) -> str:
@@ -54,10 +123,10 @@ def _shell(title: str, inner: str) -> str:
     """
 
 
-def _otp_box(code: str) -> str:
+def _otp_box(code: str, size: int = 32, spacing: int = 8) -> str:
     return f"""
     <div style="background-color: #1e293b; border: 1px solid #334155; padding: 18px; border-radius: 12px; text-align: center; margin: 20px 0;">
-      <span style="font-family: monospace; font-size: 32px; font-weight: bold; letter-spacing: 8px; color: #10b981;">{escape(code)}</span>
+      <span style="font-family: monospace; font-size: {size}px; font-weight: bold; letter-spacing: {spacing}px; color: #10b981;">{escape(code)}</span>
     </div>
     """
 
@@ -73,13 +142,21 @@ def staff_login_otp_email(code: str, minutes: int) -> tuple:
     return subject, body
 
 
-def password_reset_otp_email(code: str, minutes: int) -> tuple:
-    subject = f"NexusAssess Security: Password reset passcode [{code}]"
+def staff_credentials_email(name: str, login_url: str, email: str, temp_password: str, is_reset: bool) -> tuple:
+    """Sent by the system when an administrator creates an account or resets a password."""
+    title = "Your password was reset" if is_reset else "Your NexusAssess account is ready"
+    subject = f"NexusAssess: {title}"
     body = _shell(
-        "Password reset request",
-        f"""<p style="color: #94a3b8; font-size: 14px;">Use this one-time passcode to reset your password:</p>
-        {_otp_box(code)}
-        <p style="color: #64748b; font-size: 12px;">Valid for {minutes} minutes. If you didn't request this, ignore this email.</p>""",
+        f"Hello {escape(name)},",
+        f"""<p style="color: #94a3b8; font-size: 14px; line-height: 1.6;">
+        {"An administrator reset your password." if is_reset else "An administrator created a staff account for you."}
+        Sign in with the temporary password below. You will be asked to choose your own password straight away.</p>
+        <p style="color: #94a3b8; font-size: 13px;">Login: <strong style="color:#e2e8f0">{escape(email)}</strong></p>
+        {_otp_box(temp_password, size=22, spacing=2)}
+        <div style="margin: 24px 0;">
+          <a href="{escape(login_url)}" target="_blank" style="background-color: #2563eb; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 10px; font-weight: bold; font-size: 14px; display: inline-block;">SIGN IN</a>
+        </div>
+        <p style="color: #64748b; font-size: 12px;">Do not share this password. It stops working as soon as you set a new one.</p>""",
     )
     return subject, body
 
@@ -106,5 +183,18 @@ def candidate_resend_otp_email(name: str, code: str, minutes: int) -> tuple:
         f"""<p style="color: #94a3b8; font-size: 14px;">Here is your new one-time passcode:</p>
         {_otp_box(code)}
         <p style="color: #64748b; font-size: 12px;">Valid for {minutes} minutes.</p>""",
+    )
+    return subject, body
+
+
+def staff_contact_changed_email(name: str, what: str, new_value: str, admin_email: str) -> tuple:
+    """Sent to the PREVIOUS address when an administrator changes a staff member's login / 2FA email."""
+    subject = "NexusAssess security notice: your account details were changed"
+    body = _shell(
+        f"Hello {escape(name)},",
+        f"""<p style="color: #94a3b8; font-size: 14px; line-height: 1.6;">An administrator ({escape(admin_email)})
+        changed the <strong style="color:#e2e8f0">{escape(what)}</strong> of your NexusAssess account to
+        <strong style="color:#e2e8f0">{escape(new_value)}</strong>. You have been signed out everywhere.</p>
+        <p style="color: #64748b; font-size: 12px;">If you did not expect this, contact your administrator right away.</p>""",
     )
     return subject, body

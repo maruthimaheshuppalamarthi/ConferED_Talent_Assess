@@ -1,7 +1,9 @@
-import { UserRole } from '../types';
+import { Portal, UserRole } from '../types';
 
 /**
  * Client for the backend auth API (JWT + server-side OTP + RBAC).
+ *
+ * Every staff portal has its own login API:  /admin/auth/*, /recruiter/auth/*, /proctor/auth/*.
  *
  * Token handling:
  *  - Staff access token is kept in memory only (never localStorage) and sent as a Bearer header.
@@ -19,9 +21,13 @@ export interface AuthUser {
   email: string;
   name: string;
   role: UserRole;
-  workspaces: UserRole[];
+  portals: Portal[];
   isActive?: boolean;
+  mustChangePassword?: boolean;
   createdAt?: string | null;
+  lastLoginAt?: string | null;
+  phone?: string | null;
+  department?: string | null;
 }
 
 export interface OtpChallenge {
@@ -35,6 +41,12 @@ export interface StaffSession {
   accessToken: string;
   expiresIn: number;
   user: AuthUser;
+}
+
+export interface StaffCredentials {
+  user: AuthUser;
+  temporaryPassword: string;
+  emailed: boolean;
 }
 
 export interface CandidateSession {
@@ -64,6 +76,8 @@ type AuthMode = 'staff' | 'candidate' | 'none';
 
 let staffToken: string | null = null;
 let candidateToken: string | null = null;
+/** Portal the staff session was opened for; silent token refreshes go through that portal's API. */
+let activePortal: Portal = 'recruiter';
 let refreshInFlight: Promise<StaffSession | null> | null = null;
 let onSessionExpired: (() => void) | null = null;
 
@@ -92,19 +106,22 @@ async function rawRequest(path: string, method: string, body: unknown, mode: Aut
   }
 }
 
-async function request<T>(path: string, method = 'GET', body?: unknown, mode: AuthMode = 'none'): Promise<T> {
+/** Send a request; if the staff access token has expired, refresh it silently once and replay. */
+async function requestWithRefresh(path: string, method: string, body: unknown, mode: AuthMode): Promise<Response> {
   let res = await rawRequest(path, method, body, mode);
-
-  // Access token expired -> try one silent refresh, then replay the request.
   if (res.status === 401 && mode === 'staff' && staffToken) {
-    const session = await refreshSession();
+    const session = await refreshSession(activePortal);
     if (session) {
       res = await rawRequest(path, method, body, mode);
     } else {
       handleSessionExpired();
     }
   }
+  return res;
+}
 
+async function request<T>(path: string, method = 'GET', body?: unknown, mode: AuthMode = 'none'): Promise<T> {
+  const res = await requestWithRefresh(path, method, body, mode);
   const data = await res.json().catch(() => null);
   if (!res.ok) throw new ApiError(res.status, errorMessage(data, res.status));
   return data as T;
@@ -115,11 +132,11 @@ function handleSessionExpired() {
   onSessionExpired?.();
 }
 
-async function refreshSession(): Promise<StaffSession | null> {
+async function refreshSession(portal: Portal): Promise<StaffSession | null> {
   if (!refreshInFlight) {
     refreshInFlight = (async () => {
       try {
-        const res = await rawRequest('/auth/refresh', 'POST', undefined, 'none');
+        const res = await rawRequest(`/${portal}/auth/refresh`, 'POST', undefined, 'none');
         if (!res.ok) return null;
         const session = (await res.json()) as StaffSession;
         staffToken = session.accessToken;
@@ -146,50 +163,50 @@ export const authApi = {
   getCandidateToken: () => candidateToken,
 
   // ---------------------------------------------------------------- staff
-  login: (email: string, password: string) =>
-    request<OtpChallenge>('/auth/login', 'POST', { email, password }),
+  /** Step 1: password check on the portal's own login API; the server emails a one-time passcode. */
+  login: (portal: Portal, email: string, password: string) =>
+    request<OtpChallenge>(`/${portal}/auth/login`, 'POST', { email, password }),
 
-  async verifyOtp(challengeId: string, otp: string): Promise<StaffSession> {
-    const session = await request<StaffSession>('/auth/verify-otp', 'POST', { challengeId, otp });
+  /** Step 2: exchange the OTP for a session. */
+  async verifyOtp(portal: Portal, challengeId: string, otp: string): Promise<StaffSession> {
+    const session = await request<StaffSession>(`/${portal}/auth/verify-otp`, 'POST', { challengeId, otp });
     staffToken = session.accessToken;
+    activePortal = portal;
     return session;
   },
 
-  resendOtp: (challengeId: string) => request<OtpChallenge>('/auth/resend-otp', 'POST', { challengeId }),
+  resendOtp: (portal: Portal, challengeId: string) =>
+    request<OtpChallenge>(`/${portal}/auth/resend-otp`, 'POST', { challengeId }),
 
-  register: (name: string, email: string, password: string) =>
-    request<AuthUser>('/auth/register', 'POST', { name, email, password }),
+  /** Page-load: try to turn the HttpOnly refresh cookie into a fresh in-memory session for this portal. */
+  async restoreSession(portal: Portal): Promise<StaffSession | null> {
+    activePortal = portal;
+    return refreshSession(portal);
+  },
 
-  requestPasswordReset: (email: string) =>
-    request<OtpChallenge>('/auth/password-reset/request', 'POST', { email }),
+  /** Signed-in user moving to another portal they are allowed into (System Admin only). */
+  setActivePortal(portal: Portal) {
+    activePortal = portal;
+  },
 
-  confirmPasswordReset: (challengeId: string, otp: string, newPassword: string) =>
-    request<{ status: string; message: string }>('/auth/password-reset/confirm', 'POST', {
-      challengeId,
-      otp,
-      newPassword,
-    }),
-
-  /** Page-load: try to turn the HttpOnly refresh cookie into a fresh in-memory session. */
-  async restoreSession(): Promise<StaffSession | null> {
-    return refreshSession();
+  /** Choose your own password (mandatory after an admin created the account or reset the password). */
+  async changePassword(portal: Portal, currentPassword: string, newPassword: string): Promise<StaffSession> {
+    const session = await request<StaffSession>(
+      `/${portal}/auth/change-password`, 'POST', { currentPassword, newPassword }, 'staff');
+    staffToken = session.accessToken;
+    return session;
   },
 
   /** Best effort: always drops the local token, never rejects (server may be unreachable). */
   async logout(): Promise<void> {
     try {
-      await rawRequest('/auth/logout', 'POST', undefined, 'none');
+      await rawRequest(`/${activePortal}/auth/logout`, 'POST', undefined, 'none');
     } catch {
       // Server unreachable: the refresh cookie simply expires; local sign-out still proceeds.
     } finally {
       staffToken = null;
     }
   },
-
-  me: () => request<AuthUser>('/auth/me', 'GET', undefined, 'staff'),
-  listStaff: () => request<AuthUser[]>('/auth/staff', 'GET', undefined, 'staff'),
-  createStaff: (name: string, email: string, password: string, role: UserRole) =>
-    request<AuthUser>('/auth/staff', 'POST', { name, email, password, role }, 'staff'),
 
   // ------------------------------------------------------------ candidates
   createInvite: (p: {
@@ -199,19 +216,35 @@ export const authApi = {
     assessmentId: string;
     expiresInHours: number;
     candidateId?: string;
-  }) => request<InviteResult>('/auth/candidate/invites', 'POST', p, 'staff'),
+  }) => request<InviteResult>('/recruiter/candidates/invites', 'POST', p, 'staff'),
 
   async candidateVerify(inviteToken: string, otp: string): Promise<CandidateSession> {
-    const session = await request<CandidateSession>('/auth/candidate/verify', 'POST', { inviteToken, otp });
+    const session = await request<CandidateSession>('/candidate/verify', 'POST', { inviteToken, otp });
     candidateToken = session.accessToken;
     return session;
   },
 
   candidateResendOtp: (inviteToken: string) =>
-    request<OtpChallenge>('/auth/candidate/resend-otp', 'POST', { inviteToken }),
+    request<OtpChallenge>('/candidate/resend-otp', 'POST', { inviteToken }),
 
   clearCandidateSession() {
     candidateToken = null;
+  },
+
+  /** Authenticated file download (e.g. the audit CSV): returns the file and the name the server suggested. */
+  async downloadFile(path: string): Promise<{ blob: Blob; filename: string; truncated: boolean }> {
+    const res = await requestWithRefresh(path, 'GET', undefined, 'staff');
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new ApiError(res.status, errorMessage(data, res.status));
+    }
+    const disposition = res.headers.get('Content-Disposition') || '';
+    const match = /filename="?([^";]+)"?/i.exec(disposition);
+    return {
+      blob: await res.blob(),
+      filename: match ? match[1] : 'download.csv',
+      truncated: res.headers.get('X-Export-Truncated') === 'true',
+    };
   },
 
   /** Authenticated fetch helper for other API calls (adds the right bearer token). */

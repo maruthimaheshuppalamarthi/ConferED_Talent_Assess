@@ -1,4 +1,20 @@
-export type UserRole = 'Candidate' | 'Recruiter' | 'Admin' | 'Super Admin' | 'Question Reviewer' | 'HR' | 'System Auditor';
+/** Account roles. Staff roles are assigned by a System Admin; each has its own portal. */
+export type UserRole = 'Candidate' | 'System Admin' | 'Recruiter' | 'Proctor';
+export type StaffRole = Exclude<UserRole, 'Candidate'>;
+
+/** The three staff portals (URL: /admin, /recruiter, /proctor). */
+export type Portal = 'admin' | 'recruiter' | 'proctor';
+
+export interface LiveCandidate {
+  candidateId: string;
+  name: string;
+  role: string;
+  sectionName: string;
+  timeRemaining: string;
+  violations: number;
+  status: 'normal' | 'warning';
+  lastEvent: string;
+}
 
 export interface SystemSettings {
   maxTabSwitches: number;
@@ -66,6 +82,7 @@ export interface Section {
   passingMarks: number;
   questions: Question[];
   isMandatory: boolean;
+  randomizeQuestions?: boolean;
 }
 
 export interface Assessment {

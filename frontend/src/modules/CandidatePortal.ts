@@ -15,7 +15,13 @@ export class CandidatePortalModule {
     this.attachFullscreenEnforcement();
   }
 
+  // The app creates a new CandidatePortalModule on every re-render; the lockdown must be wired up only once.
+  private static fullscreenEnforcementBound = false;
+
   private attachFullscreenEnforcement() {
+    if (CandidatePortalModule.fullscreenEnforcementBound) return;
+    CandidatePortalModule.fullscreenEnforcementBound = true;
+
     // Add a blocker overlay to DOM that shows when not in fullscreen
     const blocker = document.createElement('div');
     blocker.id = 'fullscreen-enforcer-overlay';
@@ -52,7 +58,7 @@ export class CandidatePortalModule {
       if (state.otpVerified && !isFeedbackSubmitted) {
         if (!document.fullscreenElement) {
           blocker.classList.remove('hidden');
-          store.addProctoringViolation('Fullscreen Exit', 'high', 'Candidate forcibly exited fullscreen lockdown mode');
+          store.logProctoringViolation('Fullscreen Exit', 'Candidate forcibly exited fullscreen lockdown mode', 'high');
         } else {
           blocker.classList.add('hidden');
         }

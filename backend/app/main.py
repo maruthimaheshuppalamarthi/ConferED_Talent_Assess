@@ -1,23 +1,35 @@
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List
 
-from fastapi import Depends, FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from app.api import auth as auth_api
-from app.api.deps import authenticate_websocket, get_current_principal, require_role
+from app.api import admin as admin_api
+from app.api import admin_audit as admin_audit_api
+from app.api import admin_dashboard as admin_dashboard_api
+from app.api import admin_staff_actions as admin_staff_actions_api
+from app.api import admin_staff_directory as admin_staff_directory_api
+from app.api import admin_staff_sessions as admin_staff_sessions_api
+from app.api import admin_settings as admin_settings_api
+from app.api import candidate as candidate_api
+from app.api import policy as policy_api
+from app.api import proctor as proctor_api
+from app.api import recruiter as recruiter_api
+from app.api.deps import get_current_principal
+from app.api.staff_auth import build_staff_auth_router
 from app.core.config import settings
-from app.core.roles import ROLE_ADMIN, ROLE_RECRUITER, has_min_role
-from app.db.session import SessionLocal
-from app.models.auth import StaffUser
-from app.services import email as email_service
+from app.core.prod_checks import enforce_startup_checks
+from app.core.roles import PORTAL_ADMIN, PORTAL_PROCTOR, PORTAL_RECRUITER
 from app.services.bootstrap import init_auth_db
 from app.services.docker_sandbox import DockerSandboxService
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    enforce_startup_checks()   # production: refuse to start on unsafe configuration
     init_auth_db()
     yield
 
@@ -25,9 +37,11 @@ async def lifespan(_: FastAPI):
 app = FastAPI(
     title=settings.PROJECT_NAME,
     description="Production-grade AI Online Assessment Platform REST & WebSocket API",
-    version="4.3.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
+    version="5.0.0",
+    # The interactive docs are off in production (ENABLE_DOCS=true to override).
+    docs_url="/docs" if settings.ENABLE_DOCS else None,
+    redoc_url="/redoc" if settings.ENABLE_DOCS else None,
+    openapi_url="/openapi.json" if settings.ENABLE_DOCS else None,
     lifespan=lifespan,
 )
 
@@ -38,52 +52,63 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
+    # the browser app may read these (rate-limit back-off, CSV download name / truncation flag)
+    expose_headers=["Retry-After", "Content-Disposition", "X-Export-Truncated"],
 )
 
-app.include_router(auth_api.router, prefix=settings.API_V1_STR)
+_DOC_PATHS = ("/docs", "/redoc", "/openapi.json")
 
 
-# Active WebSocket Proctors Connection Manager
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: List[Tuple[WebSocket, dict]] = []
-
-    async def connect(self, websocket: WebSocket, principal: dict):
-        await websocket.accept()
-        self.active_connections.append((websocket, principal))
-
-    def disconnect(self, websocket: WebSocket):
-        self.active_connections = [(ws, p) for ws, p in self.active_connections if ws is not websocket]
-
-    async def broadcast_to_monitors(self, message: dict):
-        """Proctoring events go only to staff allowed to use the Live Monitor (Admin+)."""
-        for ws, principal in list(self.active_connections):
-            if principal["kind"] == "staff" and has_min_role(principal["role"], ROLE_ADMIN):
-                try:
-                    await ws.send_json(message)
-                except Exception:
-                    self.disconnect(ws)
+@app.middleware("http")
+async def limit_request_size(request: Request, call_next):
+    """Reject oversized bodies early (declared Content-Length; the server also bounds what it reads)."""
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > settings.MAX_REQUEST_BYTES:
+        return JSONResponse(status_code=413, content={"detail": "The request body is too large."})
+    return await call_next(request)
 
 
-manager = ConnectionManager()
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    """Defensive headers on every response (the interactive docs need scripts, so they only get the basics)."""
+    response = await call_next(request)
+    headers = response.headers
+    headers.setdefault("X-Content-Type-Options", "nosniff")
+    headers.setdefault("X-Frame-Options", "DENY")
+    headers.setdefault("Referrer-Policy", "no-referrer")
+    headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    if not request.url.path.startswith(_DOC_PATHS):
+        headers.setdefault("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
+        headers.setdefault("Cache-Control", "no-store")  # tokens, staff data and audit logs must not be cached
+    if settings.COOKIE_SECURE:
+        headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    return response
 
 
-# Request Models
+if settings.ALLOWED_HOSTS:  # outermost: unknown Host headers never reach the app
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.ALLOWED_HOSTS)
+
+# One login/session API per portal, plus the portal-specific feature APIs.
+for _portal in (PORTAL_ADMIN, PORTAL_RECRUITER, PORTAL_PROCTOR):
+    app.include_router(build_staff_auth_router(_portal), prefix=settings.API_V1_STR)
+app.include_router(admin_api.router, prefix=settings.API_V1_STR)
+app.include_router(admin_staff_directory_api.router, prefix=settings.API_V1_STR)  # /search before /{id}
+app.include_router(admin_staff_actions_api.router, prefix=settings.API_V1_STR)
+app.include_router(admin_staff_sessions_api.router, prefix=settings.API_V1_STR)
+app.include_router(admin_audit_api.router, prefix=settings.API_V1_STR)
+app.include_router(admin_settings_api.router, prefix=settings.API_V1_STR)
+app.include_router(admin_dashboard_api.router, prefix=settings.API_V1_STR)
+app.include_router(admin_dashboard_api.public_router)  # /health, /health/ready (no auth, no details)
+app.include_router(policy_api.router, prefix=settings.API_V1_STR)
+app.include_router(recruiter_api.router, prefix=settings.API_V1_STR)
+app.include_router(candidate_api.router, prefix=settings.API_V1_STR)
+app.include_router(proctor_api.router)  # WebSocket: /ws/proctoring
+
+
 class CodeRunRequest(BaseModel):
     language: str
     code: str
     testCases: List[Dict[str, Any]]
-
-
-class EmailSendRequest(BaseModel):
-    recipientEmail: str
-    recipientName: Optional[str] = "Candidate"
-    subject: str
-    bodyHtml: str
-    smtpHost: Optional[str] = "smtp.gmail.com"
-    smtpPort: Optional[int] = 587
-    smtpUser: Optional[str] = ""
-    smtpPassword: Optional[str] = ""
 
 
 @app.get("/")
@@ -91,8 +116,8 @@ def read_root():
     return {
         "status": "online",
         "system": settings.PROJECT_NAME,
-        "version": "4.3.0",
-        "docs": "/docs",
+        "version": "5.0.0",
+        "docs": "/docs" if settings.ENABLE_DOCS else None,
     }
 
 
@@ -113,62 +138,3 @@ def execute_code_endpoint(req: CodeRunRequest, principal: dict = Depends(get_cur
         "memoryUsedKb": 12800,
         "testResults": [],
     }
-
-
-@app.post("/api/v1/send-email")
-def send_email_endpoint(req: EmailSendRequest, _: StaffUser = Depends(require_role(ROLE_RECRUITER))):
-    """
-    Delivers email notifications via Gmail SMTP. Staff only (Recruiter and above).
-    """
-    sender_email = (req.smtpUser and "placeholder" not in req.smtpUser) and req.smtpUser or settings.GMAIL_SENDER_EMAIL
-    app_password = (req.smtpPassword and "placeholder" not in req.smtpPassword) and req.smtpPassword or settings.GMAIL_APP_PASSWORD
-
-    ok = email_service.send_email(
-        req.recipientEmail, req.subject, req.bodyHtml,
-        sender_email=sender_email, app_password=app_password,
-        host=req.smtpHost, port=req.smtpPort,
-    )
-    if ok:
-        return {"status": "success", "message": f"Email dispatched via SMTP to {req.recipientEmail}"}
-    return {"status": "error", "message": f"SMTP delivery attempted for {req.recipientEmail} but failed"}
-
-
-@app.websocket("/ws/proctoring")
-async def websocket_proctoring_endpoint(websocket: WebSocket, token: Optional[str] = Query(default=None)):
-    """
-    Live WebSocket endpoint for proctoring events.
-    Connect with ?token=<access or candidate JWT>.
-      - Candidates may only publish events about themselves.
-      - Only Admin+ staff receive the broadcast stream.
-    """
-    db = SessionLocal()
-    try:
-        principal = authenticate_websocket(token, db)
-    finally:
-        db.close()
-
-    if principal is None:
-        await websocket.close(code=4401)  # unauthenticated
-        return
-
-    await manager.connect(websocket, principal)
-    try:
-        while True:
-            data = await websocket.receive_json()
-            if principal["kind"] != "candidate":
-                continue  # staff connections are listen-only
-            await manager.broadcast_to_monitors({
-                "type": "PROCTORING_EVENT",
-                "candidateId": principal["id"],  # never trust a client-supplied id
-                "event": data.get("event"),
-                "severity": data.get("severity", "medium"),
-                "timestamp": data.get("timestamp"),
-            })
-    except WebSocketDisconnect:
-        manager.disconnect(websocket)
-    except Exception:
-        manager.disconnect(websocket)
-        try:
-            await websocket.close(code=1011)
-        except Exception:
-            pass  # socket already closed by the peer

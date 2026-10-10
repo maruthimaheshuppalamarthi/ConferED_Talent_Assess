@@ -7,10 +7,14 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.security import generate_otp, hash_otp, verify_otp_hash
 from app.models.auth import OtpChallenge, new_id, utcnow
+from app.services import runtime_settings as rt
 
-PURPOSE_STAFF_LOGIN = "staff_login"
-PURPOSE_PASSWORD_RESET = "password_reset"
 PURPOSE_CANDIDATE_LOGIN = "candidate_login"
+
+
+def staff_login_purpose(portal: str) -> str:
+    """An OTP issued by one portal's login can only be redeemed at that same portal."""
+    return f"staff_login:{portal}"
 
 
 def issue_otp(db: Session, purpose: str, subject_id: str) -> Tuple[OtpChallenge, str]:
@@ -28,7 +32,7 @@ def issue_otp(db: Session, purpose: str, subject_id: str) -> Tuple[OtpChallenge,
         purpose=purpose,
         subject_id=subject_id,
         code_hash=hash_otp(challenge_id, code),
-        expires_at=utcnow() + timedelta(minutes=settings.OTP_EXPIRE_MINUTES),
+        expires_at=utcnow() + timedelta(minutes=rt.get_int("otpExpireMinutes")),
     )
     db.add(challenge)
     db.commit()
@@ -36,7 +40,7 @@ def issue_otp(db: Session, purpose: str, subject_id: str) -> Tuple[OtpChallenge,
 
 
 def check_resend_cooldown(challenge: OtpChallenge) -> None:
-    wait = settings.OTP_RESEND_COOLDOWN_SECONDS - (utcnow() - challenge.created_at).total_seconds()
+    wait = rt.get_int("otpResendCooldownSeconds") - (utcnow() - challenge.created_at).total_seconds()
     if wait > 0:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -55,7 +59,7 @@ def verify_challenge(db: Session, challenge: Optional[OtpChallenge], purpose: st
         challenge.consumed = True
         db.commit()
         raise invalid
-    if challenge.attempts >= settings.OTP_MAX_ATTEMPTS:
+    if challenge.attempts >= rt.get_int("otpMaxAttempts"):
         challenge.consumed = True
         db.commit()
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -64,7 +68,7 @@ def verify_challenge(db: Session, challenge: Optional[OtpChallenge], purpose: st
     code = (code or "").strip()
     if not (code.isdigit() and len(code) == settings.OTP_LENGTH and verify_otp_hash(challenge.id, code, challenge.code_hash)):
         challenge.attempts += 1
-        left = settings.OTP_MAX_ATTEMPTS - challenge.attempts
+        left = rt.get_int("otpMaxAttempts") - challenge.attempts
         if left <= 0:
             challenge.consumed = True
         db.commit()

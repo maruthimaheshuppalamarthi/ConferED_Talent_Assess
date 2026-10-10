@@ -1,8 +1,11 @@
 import { CsvExporterService } from '../services/csvExporter';
 import { ApiError, authApi } from '../services/authApi';
 import { EmailService } from '../services/emailService';
+import { getPortalTab } from '../services/portalNav';
 import { store } from '../services/store';
 import { Candidate } from '../types';
+import { AssessmentBuilderPanel } from './AssessmentBuilderPanel';
+import { QuestionBankPanel } from './QuestionBankPanel';
 
 export class RecruiterPortalModule {
   private container: HTMLElement;
@@ -15,6 +18,16 @@ export class RecruiterPortalModule {
   }
 
   public render() {
+    // Content-management sections picked from the left sidebar (same menu as the pipeline).
+    const section = getPortalTab('recruiter');
+    if (section === 'assessment-builder' || section === 'question-bank') {
+      this.container.innerHTML = '<div class="max-w-7xl mx-auto py-8 px-4 lg:px-8"><div id="recruiter-section"></div></div>';
+      const host = this.container.querySelector('#recruiter-section') as HTMLElement;
+      if (section === 'assessment-builder') new AssessmentBuilderPanel(host).render();
+      else new QuestionBankPanel(host).render();
+      return;
+    }
+
     const state = store.getState();
     const candidates = state.candidates;
 
@@ -800,7 +813,7 @@ export class RecruiterPortalModule {
 
       sendBtn.disabled = true;
       try {
-        // The server creates the personal invite link + OTP and emails both to the candidate (RBAC: Recruiter+).
+        // The server creates the personal invite link + OTP and emails both to the candidate (RBAC: Recruiter or System Admin).
         const invite = await authApi.createInvite({
           name,
           email,

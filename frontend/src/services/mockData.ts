@@ -1,4 +1,4 @@
-import { Assessment, Candidate, CandidateResult, Question, SystemSettings } from '../types';
+import { Assessment, Candidate, CandidateResult, LiveCandidate, Question, SystemSettings } from '../types';
 
 export const initialSettings: SystemSettings = {
   maxTabSwitches: 3,
@@ -209,6 +209,40 @@ export const sampleCandidates: Candidate[] = [
     livePhotoUrl: demoLivePhoto,
     idProofUrl: demoIdProof,
     identityStatus: 'approved'
+  }
+];
+
+/** Demo sessions shown in the Live Proctoring Monitor until the real event stream is wired in. */
+export const sampleLiveCandidates: LiveCandidate[] = [
+  {
+    candidateId: 'cand-3',
+    name: 'Marcus Vance',
+    role: 'Frontend Engineer',
+    sectionName: 'Algorithmic Coding Challenge',
+    timeRemaining: '18:42',
+    violations: 0,
+    status: 'normal',
+    lastEvent: ''
+  },
+  {
+    candidateId: 'cand-2',
+    name: 'Priya Sharma',
+    role: 'Backend Engineer',
+    sectionName: 'Database & SQL Engineering',
+    timeRemaining: '09:15',
+    violations: 2,
+    status: 'warning',
+    lastEvent: 'Tab Switch detected'
+  },
+  {
+    candidateId: 'cand-1',
+    name: 'Alex Rivera',
+    role: 'Platform Engineer',
+    sectionName: 'Technical MCQs & Aptitude',
+    timeRemaining: '24:03',
+    violations: 0,
+    status: 'normal',
+    lastEvent: ''
   }
 ];
 

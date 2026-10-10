@@ -10,6 +10,7 @@ import bcrypt
 import jwt
 
 from app.core.config import settings
+from app.services import runtime_settings as rt  # token lifetimes are System-Admin settings
 
 # Token types (the "typ" claim). Each protected route only accepts the type it expects,
 # so a refresh token or candidate token can never be replayed as a staff access token.
@@ -55,6 +56,14 @@ def verify_otp_hash(challenge_id: str, code: str, expected_hash: str) -> bool:
     return hmac.compare_digest(hash_otp(challenge_id, code), expected_hash)
 
 
+_TEMP_PASSWORD_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789"  # no look-alike characters
+
+
+def generate_temp_password(length: int = 12) -> str:
+    """Random one-time password handed to a user by an admin (must be changed at first sign-in)."""
+    return "".join(secrets.choice(_TEMP_PASSWORD_ALPHABET) for _ in range(length))
+
+
 # ------------------------------------------------------------ opaque tokens
 def generate_opaque_token() -> str:
     """URL-safe random token (used for candidate invite links)."""
@@ -73,6 +82,9 @@ def _encode(claims: Dict[str, Any], expires_delta: timedelta, token_type: str) -
         "typ": token_type,
         "iss": settings.JWT_ISSUER,
         "iat": now,
+        # JWT "iat" only has 1-second resolution; this exact issue time lets an admin's force-logout cut off
+        # precisely the tokens issued before it (see StaffUser.sessions_valid_after).
+        "iatus": int(now.timestamp() * 1_000_000),
         "exp": now + expires_delta,
         "jti": claims.get("jti") or uuid.uuid4().hex,
     }
@@ -82,7 +94,7 @@ def _encode(claims: Dict[str, Any], expires_delta: timedelta, token_type: str) -
 def create_access_token(user_id: str, role: str) -> str:
     return _encode(
         {"sub": user_id, "role": role},
-        timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
+        timedelta(minutes=rt.get_int("accessTokenExpireMinutes")),
         TOKEN_ACCESS,
     )
 
@@ -90,7 +102,7 @@ def create_access_token(user_id: str, role: str) -> str:
 def create_refresh_token(user_id: str, role: str, jti: str) -> str:
     return _encode(
         {"sub": user_id, "role": role, "jti": jti},
-        timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS),
+        timedelta(days=rt.get_int("refreshTokenExpireDays")),
         TOKEN_REFRESH,
     )
 

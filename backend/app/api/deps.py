@@ -1,16 +1,18 @@
-from typing import Callable, Optional, Union
+from typing import Callable, Optional
 
 import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
-from app.core.roles import has_min_role
+from app.core.roles import can_access_portal
 from app.core.security import TOKEN_ACCESS, TOKEN_CANDIDATE, decode_token
 from app.db.session import get_db
 from app.models.auth import CandidateInvite, StaffUser, utcnow
 
 _bearer = HTTPBearer(auto_error=False)
+
+PASSWORD_CHANGE_REQUIRED = "PASSWORD_CHANGE_REQUIRED"
 
 
 def _unauthorized(detail: str = "Not authenticated") -> HTTPException:
@@ -31,8 +33,14 @@ def staff_from_token(token: str, db: Session) -> StaffUser:
         raise _unauthorized("Invalid access token")
 
     user = db.get(StaffUser, payload["sub"])
-    if user is None or not user.is_active:
+    if user is None or not user.is_active or user.deleted_at is not None:
         raise _unauthorized("Account not found or disabled")
+    # An administrator ended this user's sessions after the token was issued.
+    cutoff = user.sessions_valid_after
+    if cutoff is not None:
+        issued_us = payload.get("iatus") or int(payload.get("iat", 0)) * 1_000_000  # older tokens: whole seconds
+        if issued_us < int(cutoff.timestamp() * 1_000_000):
+            raise _unauthorized("Your session was ended. Please sign in again.")
     return user  # the DB role is the source of truth, not the token claim
 
 
@@ -61,19 +69,25 @@ def get_current_staff(
     creds: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
     db: Session = Depends(get_db),
 ) -> StaffUser:
+    """Any signed-in staff member (does NOT check portal access or a pending password change)."""
     if creds is None:
         raise _unauthorized()
     return staff_from_token(creds.credentials, db)
 
 
-def require_role(minimum: str) -> Callable[..., StaffUser]:
-    """Dependency factory: staff user with at least the given role (RBAC)."""
+def require_portal(portal: str) -> Callable[..., StaffUser]:
+    """Dependency factory: staff whose role may use `portal` and who has already set their own password."""
 
     def checker(user: StaffUser = Depends(get_current_staff)) -> StaffUser:
-        if not has_min_role(user.role, minimum):
+        if not can_access_portal(user.role, portal):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Requires {minimum} role or higher",
+                detail=f"Your role ({user.role}) cannot access the {portal} portal",
+            )
+        if user.must_change_password:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=PASSWORD_CHANGE_REQUIRED,
             )
         return user
 
@@ -105,6 +119,8 @@ def get_current_principal(
 
     if typ == TOKEN_ACCESS:
         user = staff_from_token(creds.credentials, db)
+        if user.must_change_password:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=PASSWORD_CHANGE_REQUIRED)
         return {"kind": "staff", "id": user.id, "role": user.role}
     if typ == TOKEN_CANDIDATE:
         cand = candidate_from_token(creds.credentials, db)
@@ -121,6 +137,8 @@ def authenticate_websocket(token: Optional[str], db: Session) -> Optional[dict]:
         typ = decode_token(token).get("typ")
         if typ == TOKEN_ACCESS:
             user = staff_from_token(token, db)
+            if user.must_change_password:
+                return None
             return {"kind": "staff", "id": user.id, "role": user.role}
         if typ == TOKEN_CANDIDATE:
             cand = candidate_from_token(token, db)

@@ -48,7 +48,7 @@ export class EmailService {
     return entry;
   }
 
-  /** Staff-only SMTP smoke test (requires a signed-in Recruiter+; enforced by the backend). */
+  /** Staff-only SMTP smoke test (requires a signed-in Recruiter or System Admin; enforced by the backend). */
   public static async sendTestEmail(recipientEmail: string): Promise<boolean> {
     const subject = 'NexusAssess SMTP test';
     const bodyHtml = '<p>This is a test email from the NexusAssess admin console.</p>';
@@ -66,7 +66,7 @@ export class EmailService {
     this.sentEmails.unshift(entry);
 
     try {
-      const res = await authApi.fetchJson<{ status: string }>('/send-email', 'POST', {
+      const res = await authApi.fetchJson<{ status: string }>('/recruiter/send-email', 'POST', {
         recipientEmail,
         recipientName: 'Admin',
         subject,

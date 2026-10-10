@@ -34,222 +34,399 @@ def client():
         yield c
 
 
-def staff_login(client, email=ADMIN["email"], password=ADMIN["password"]):
-    r = client.post(f"{API}/auth/login", json={"email": email, "password": password})
-    assert r.status_code == 200, r.text
-    ch = r.json()
-    r = client.post(f"{API}/auth/verify-otp", json={"challengeId": ch["challengeId"], "otp": ch["devOtp"]})
-    assert r.status_code == 200, r.text
-    return r.json()["accessToken"]
-
-
 def bearer(token):
     return {"Authorization": f"Bearer {token}"}
 
 
-# ------------------------------------------------------------------ staff login
-def test_wrong_password_rejected(client):
-    r = client.post(f"{API}/auth/login", json={"email": ADMIN["email"], "password": "nope"})
-    assert r.status_code == 401
+def login_step1(client, portal, email, password):
+    return client.post(f"{API}/{portal}/auth/login", json={"email": email, "password": password})
 
 
-def test_login_requires_real_otp(client):
-    r = client.post(f"{API}/auth/login", json=ADMIN)
+def portal_login(client, portal, email, password):
+    """Full two-step sign-in. Returns the TokenOut JSON."""
+    r = login_step1(client, portal, email, password)
+    assert r.status_code == 200, r.text
     ch = r.json()
-    wrong = "000000" if ch["devOtp"] != "000000" else "111111"
-    r = client.post(f"{API}/auth/verify-otp", json={"challengeId": ch["challengeId"], "otp": wrong})
+    r = client.post(f"{API}/{portal}/auth/verify-otp", json={"challengeId": ch["challengeId"], "otp": ch["devOtp"]})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def admin_token(client):
+    return portal_login(client, "admin", **ADMIN)["accessToken"]
+
+
+def create_staff(client, admin, name, email, role, password=None):
+    body = {"name": name, "email": email, "role": role}
+    if password:
+        body["password"] = password
+    r = client.post(f"{API}/admin/staff", headers=bearer(admin), json=body)
+    assert r.status_code == 201, r.text
+    return r.json()
+
+
+def ready_staff(client, admin, portal, email, role, name="Test User", final_password="MyOwnPass123"):
+    """Admin creates the account, the user signs in with the temp password and chooses their own."""
+    created = create_staff(client, admin, name, email, role)
+    session = portal_login(client, portal, email, created["temporaryPassword"])
+    assert session["user"]["mustChangePassword"] is True
+    r = client.post(f"{API}/{portal}/auth/change-password", headers=bearer(session["accessToken"]),
+                    json={"currentPassword": created["temporaryPassword"], "newPassword": final_password})
+    assert r.status_code == 200, r.text
+    assert r.json()["user"]["mustChangePassword"] is False
+    return r.json()["accessToken"]
+
+
+# ------------------------------------------------------------ portal separation
+def test_admin_signs_in_at_admin_portal(client):
+    s = portal_login(client, "admin", **ADMIN)
+    assert s["user"]["role"] == "System Admin"
+    assert s["user"]["portals"] == ["admin"]  # no inherited Recruiter / Proctor access
+
+
+def test_wrong_password_rejected(client):
+    assert login_step1(client, "admin", ADMIN["email"], "nope").status_code == 401
+
+
+def test_each_portal_login_accepts_only_its_own_role(client):
+    admin = admin_token(client)
+    create_staff(client, admin, "Rita", "rita@corp.com", "Recruiter", password="Blue-Harbor-4821")
+    create_staff(client, admin, "Pat", "pat@corp.com", "Proctor", password="PatTemp12345")
+
+    # admin account is not accepted at the recruiter / proctor logins (same generic answer)
+    for portal in ("recruiter", "proctor"):
+        r = login_step1(client, portal, ADMIN["email"], ADMIN["password"])
+        assert r.status_code == 401
+        assert "devOtp" not in r.text
+    # recruiter / proctor accounts are not accepted at the admin portal, nor each other's
+    assert login_step1(client, "admin", "rita@corp.com", "Blue-Harbor-4821").status_code == 401
+    assert login_step1(client, "proctor", "rita@corp.com", "Blue-Harbor-4821").status_code == 401
+    assert login_step1(client, "recruiter", "pat@corp.com", "PatTemp12345").status_code == 401
+    # ...but their own portal works
+    assert login_step1(client, "recruiter", "rita@corp.com", "Blue-Harbor-4821").status_code == 200
+    assert login_step1(client, "proctor", "pat@corp.com", "PatTemp12345").status_code == 200
+
+
+def test_wrong_portal_gives_same_error_as_unknown_account(client):
+    wrong_portal = login_step1(client, "recruiter", ADMIN["email"], ADMIN["password"])
+    unknown = login_step1(client, "recruiter", "nobody@corp.com", "whatever123")
+    assert wrong_portal.status_code == unknown.status_code == 401
+    assert wrong_portal.json() == unknown.json()
+
+
+def test_otp_from_one_portal_cannot_be_used_at_another(client):
+    admin = admin_token(client)
+    create_staff(client, admin, "Rex", "rex@corp.com", "Recruiter", password="RexTemp12345")
+    ch = login_step1(client, "recruiter", "rex@corp.com", "RexTemp12345").json()
+    r = client.post(f"{API}/admin/auth/verify-otp", json={"challengeId": ch["challengeId"], "otp": ch["devOtp"]})
     assert r.status_code == 401
-    # arbitrary 6 digit code must not work, correct one still does
-    r = client.post(f"{API}/auth/verify-otp", json={"challengeId": ch["challengeId"], "otp": ch["devOtp"]})
+    r = client.post(f"{API}/proctor/auth/verify-otp", json={"challengeId": ch["challengeId"], "otp": ch["devOtp"]})
+    assert r.status_code == 401
+
+
+def test_public_register_and_password_reset_are_gone(client):
+    assert client.post(f"{API}/auth/register", json={"name": "x", "email": "x@corp.com", "password": "longenough1"}).status_code == 404
+    assert client.post(f"{API}/auth/password-reset/request", json={"email": "x@corp.com"}).status_code == 404
+    assert client.post(f"{API}/auth/login", json=ADMIN).status_code == 404  # no shared login any more
+    for portal in ("admin", "recruiter", "proctor"):
+        assert client.post(f"{API}/{portal}/auth/register", json={}).status_code == 404
+        assert client.post(f"{API}/{portal}/auth/password-reset/request", json={}).status_code == 404
+
+
+# -------------------------------------------------------------------- OTP rules
+def test_login_requires_real_otp(client):
+    ch = login_step1(client, "admin", **ADMIN).json()
+    wrong = "000000" if ch["devOtp"] != "000000" else "111111"
+    r = client.post(f"{API}/admin/auth/verify-otp", json={"challengeId": ch["challengeId"], "otp": wrong})
+    assert r.status_code == 401
+    r = client.post(f"{API}/admin/auth/verify-otp", json={"challengeId": ch["challengeId"], "otp": ch["devOtp"]})
     assert r.status_code == 200
-    assert r.json()["user"]["role"] == "Admin"
     assert "HttpOnly" in r.headers["set-cookie"]
 
 
 def test_otp_single_use(client):
-    ch = client.post(f"{API}/auth/login", json=ADMIN).json()
+    ch = login_step1(client, "admin", **ADMIN).json()
     body = {"challengeId": ch["challengeId"], "otp": ch["devOtp"]}
-    assert client.post(f"{API}/auth/verify-otp", json=body).status_code == 200
-    assert client.post(f"{API}/auth/verify-otp", json=body).status_code == 401
+    assert client.post(f"{API}/admin/auth/verify-otp", json=body).status_code == 200
+    assert client.post(f"{API}/admin/auth/verify-otp", json=body).status_code == 401
 
 
 def test_otp_attempt_limit(client):
-    ch = client.post(f"{API}/auth/login", json=ADMIN).json()
+    ch = login_step1(client, "admin", **ADMIN).json()
     wrong = "000000" if ch["devOtp"] != "000000" else "111111"
     for _ in range(5):
-        client.post(f"{API}/auth/verify-otp", json={"challengeId": ch["challengeId"], "otp": wrong})
-    r = client.post(f"{API}/auth/verify-otp", json={"challengeId": ch["challengeId"], "otp": ch["devOtp"]})
+        client.post(f"{API}/admin/auth/verify-otp", json={"challengeId": ch["challengeId"], "otp": wrong})
+    r = client.post(f"{API}/admin/auth/verify-otp", json={"challengeId": ch["challengeId"], "otp": ch["devOtp"]})
     assert r.status_code in (401, 429)  # burned even though the code is now correct
 
 
 def test_new_login_invalidates_old_otp(client):
-    first = client.post(f"{API}/auth/login", json=ADMIN).json()
-    client.post(f"{API}/auth/login", json=ADMIN)
-    r = client.post(f"{API}/auth/verify-otp", json={"challengeId": first["challengeId"], "otp": first["devOtp"]})
+    first = login_step1(client, "admin", **ADMIN).json()
+    login_step1(client, "admin", **ADMIN)
+    r = client.post(f"{API}/admin/auth/verify-otp", json={"challengeId": first["challengeId"], "otp": first["devOtp"]})
     assert r.status_code == 401
+
+
+def test_resend_otp_is_portal_bound(client):
+    ch = login_step1(client, "admin", **ADMIN).json()
+    assert client.post(f"{API}/recruiter/auth/resend-otp", json={"challengeId": ch["challengeId"]}).status_code == 400
+    r = client.post(f"{API}/admin/auth/resend-otp", json={"challengeId": ch["challengeId"]})
+    assert r.status_code == 200
+    r2 = client.post(f"{API}/admin/auth/verify-otp",
+                     json={"challengeId": r.json()["challengeId"], "otp": r.json()["devOtp"]})
+    assert r2.status_code == 200
 
 
 # ----------------------------------------------------------------------- RBAC
 def test_endpoints_require_token(client):
-    assert client.get(f"{API}/auth/me").status_code == 401
-    assert client.get(f"{API}/auth/staff").status_code == 401
-    assert client.post(f"{API}/send-email", json={}).status_code in (401, 404)
+    for path in ("/admin/auth/me", "/recruiter/auth/me", "/proctor/auth/me", "/admin/staff"):
+        assert client.get(f"{API}{path}").status_code == 401
+    assert client.post(f"{API}/recruiter/send-email", json={}).status_code in (401, 422)
     assert client.post(f"{API}/code/execute", json={"language": "python", "code": "", "testCases": []}).status_code == 401
 
 
-def test_garbage_and_wrong_type_tokens_rejected(client):
-    assert client.get(f"{API}/auth/me", headers=bearer("abc.def.ghi")).status_code == 401
+def test_garbage_token_rejected(client):
+    assert client.get(f"{API}/admin/auth/me", headers=bearer("abc.def.ghi")).status_code == 401
 
 
-def test_register_creates_recruiter_only_and_rbac_enforced(client):
-    r = client.post(f"{API}/auth/register",
-                    json={"name": "Rita", "email": "rita@corp.com", "password": "longenough1", "role": "Admin"})
-    assert r.status_code == 201
-    assert r.json()["role"] == "Recruiter"  # cannot self-assign Admin
+def test_rbac_matrix(client):
+    admin = admin_token(client)
+    rec = ready_staff(client, admin, "recruiter", "rbac.rec@corp.com", "Recruiter")
+    pro = ready_staff(client, admin, "proctor", "rbac.pro@corp.com", "Proctor")
 
-    token = staff_login(client, "rita@corp.com", "longenough1")
-    assert client.get(f"{API}/auth/me", headers=bearer(token)).json()["workspaces"] == ["Recruiter"]
-    assert client.get(f"{API}/auth/staff", headers=bearer(token)).status_code == 403
-    assert client.post(f"{API}/auth/staff", headers=bearer(token),
-                       json={"name": "x", "email": "x@corp.com", "password": "longenough1", "role": "Admin"}).status_code == 403
+    invite = {"name": "M", "email": "m@example.com", "assessmentId": "assess-101"}
+    mail = {"recipientEmail": "a@b.c", "subject": "s", "bodyHtml": "b"}
+
+    # recruiter: own portal only
+    assert client.get(f"{API}/recruiter/auth/me", headers=bearer(rec)).status_code == 200
+    assert client.post(f"{API}/recruiter/candidates/invites", headers=bearer(rec), json=invite).status_code == 201
+    assert client.post(f"{API}/recruiter/send-email", headers=bearer(rec), json=mail).status_code == 200
+    assert client.get(f"{API}/admin/staff", headers=bearer(rec)).status_code == 403
+    assert client.get(f"{API}/admin/auth/me", headers=bearer(rec)).status_code == 403
+    assert client.get(f"{API}/proctor/auth/me", headers=bearer(rec)).status_code == 403
+
+    # proctor: own portal only
+    assert client.get(f"{API}/proctor/auth/me", headers=bearer(pro)).status_code == 200
+    assert client.post(f"{API}/recruiter/candidates/invites", headers=bearer(pro), json=invite).status_code == 403
+    assert client.post(f"{API}/recruiter/send-email", headers=bearer(pro), json=mail).status_code == 403
+    assert client.get(f"{API}/admin/staff", headers=bearer(pro)).status_code == 403
+    assert client.get(f"{API}/recruiter/auth/me", headers=bearer(pro)).status_code == 403
+
+    # system admin: own portal only (manages people and policy, not hiring or proctoring)
+    assert client.get(f"{API}/admin/auth/me", headers=bearer(admin)).status_code == 200
+    assert client.get(f"{API}/admin/staff", headers=bearer(admin)).status_code == 200
+    assert client.get(f"{API}/recruiter/auth/me", headers=bearer(admin)).status_code == 403
+    assert client.get(f"{API}/proctor/auth/me", headers=bearer(admin)).status_code == 403
+    assert client.post(f"{API}/recruiter/candidates/invites", headers=bearer(admin), json=invite).status_code == 403
+    assert client.post(f"{API}/recruiter/send-email", headers=bearer(admin), json=mail).status_code == 403
 
 
-def test_admin_manages_staff(client):
-    admin = staff_login(client)
-    assert client.get(f"{API}/auth/me", headers=bearer(admin)).json()["workspaces"] == ["Recruiter", "Admin", "Super Admin"]
+# ------------------------------------------------------- admin-managed accounts
+def test_admin_creates_account_with_temp_password_and_forced_change(client, no_real_email):
+    admin = admin_token(client)
+    created = create_staff(client, admin, "Nina", "nina@corp.com", "Recruiter")
+    assert created["user"]["role"] == "Recruiter"
+    assert created["user"]["mustChangePassword"] is True
+    assert len(created["temporaryPassword"]) >= 10
+    assert created["emailed"] is True
+    assert any("nina@corp.com" in str(a) for a, _ in no_real_email)  # credentials email dispatched
 
-    r = client.post(f"{API}/auth/staff", headers=bearer(admin),
-                    json={"name": "Bob", "email": "bob@corp.com", "password": "longenough1", "role": "Admin"})
-    assert r.status_code == 201
-    # Admin cannot mint a Super Admin
-    r = client.post(f"{API}/auth/staff", headers=bearer(admin),
-                    json={"name": "Eve", "email": "eve@corp.com", "password": "longenough1", "role": "Super Admin"})
-    assert r.status_code == 403
-    assert len(client.get(f"{API}/auth/staff", headers=bearer(admin)).json()) >= 2
+    session = portal_login(client, "recruiter", "nina@corp.com", created["temporaryPassword"])
+    token = session["accessToken"]
+    # until she picks her own password, the portal API is locked...
+    invite = {"name": "M", "email": "m@example.com", "assessmentId": "assess-101"}
+    r = client.post(f"{API}/recruiter/candidates/invites", headers=bearer(token), json=invite)
+    assert r.status_code == 403 and r.json()["detail"] == "PASSWORD_CHANGE_REQUIRED"
+    # ...but /me and change-password still work
+    assert client.get(f"{API}/recruiter/auth/me", headers=bearer(token)).json()["mustChangePassword"] is True
+
+    # wrong current password / weak / same password are refused
+    chg = f"{API}/recruiter/auth/change-password"
+    tmp = created["temporaryPassword"]
+    assert client.post(chg, headers=bearer(token), json={"currentPassword": "bad", "newPassword": "BrandNew1234"}).status_code == 401
+    assert client.post(chg, headers=bearer(token), json={"currentPassword": tmp, "newPassword": "123"}).status_code == 422
+    assert client.post(chg, headers=bearer(token), json={"currentPassword": tmp, "newPassword": tmp}).status_code == 422
+
+    r = client.post(chg, headers=bearer(token), json={"currentPassword": tmp, "newPassword": "BrandNew1234"})
+    assert r.status_code == 200
+    assert client.post(f"{API}/recruiter/candidates/invites", headers=bearer(r.json()["accessToken"]), json=invite).status_code == 201
+    # old temp password is dead, new one works
+    assert login_step1(client, "recruiter", "nina@corp.com", tmp).status_code == 401
+    assert login_step1(client, "recruiter", "nina@corp.com", "BrandNew1234").status_code == 200
 
 
-def test_weak_password_rejected(client):
-    r = client.post(f"{API}/auth/register", json={"name": "W", "email": "weak@corp.com", "password": "123"})
+def test_duplicate_email_and_bad_role_rejected(client):
+    admin = admin_token(client)
+    create_staff(client, admin, "Dup", "dup@corp.com", "Recruiter")
+    r = client.post(f"{API}/admin/staff", headers=bearer(admin),
+                    json={"name": "Dup2", "email": "dup@corp.com", "role": "Recruiter"})
+    assert r.status_code == 409
+    r = client.post(f"{API}/admin/staff", headers=bearer(admin),
+                    json={"name": "Bad", "email": "bad@corp.com", "role": "Super Admin"})
     assert r.status_code == 422
 
 
+def test_admin_resets_password(client, no_real_email):
+    admin = admin_token(client)
+    old_token = ready_staff(client, admin, "recruiter", "reset.me@corp.com", "Recruiter", final_password="OriginalPass1")
+    user_id = next(u["id"] for u in client.get(f"{API}/admin/staff", headers=bearer(admin)).json()
+                   if u["email"] == "reset.me@corp.com")
+
+    r = client.post(f"{API}/admin/staff/{user_id}/reset-password", headers=bearer(admin))
+    assert r.status_code == 200
+    temp = r.json()["temporaryPassword"]
+    assert r.json()["user"]["mustChangePassword"] is True
+    assert any("reset.me@corp.com" in str(a) for a, _ in no_real_email)
+
+    assert login_step1(client, "recruiter", "reset.me@corp.com", "OriginalPass1").status_code == 401
+    # the reset ends every existing session at once: the old access token is refused outright
+    invite = {"name": "M", "email": "m@example.com", "assessmentId": "assess-101"}
+    assert client.post(f"{API}/recruiter/candidates/invites", headers=bearer(old_token), json=invite).status_code == 401
+    session = portal_login(client, "recruiter", "reset.me@corp.com", temp)
+    assert session["user"]["mustChangePassword"] is True
+
+
+def test_only_admin_can_manage_and_not_self(client):
+    admin = admin_token(client)
+    rec = ready_staff(client, admin, "recruiter", "norights@corp.com", "Recruiter")
+    users = client.get(f"{API}/admin/staff", headers=bearer(admin)).json()
+    me = next(u for u in users if u["email"] == ADMIN["email"])
+    target = next(u for u in users if u["email"] == "norights@corp.com")
+
+    assert client.post(f"{API}/admin/staff/{target['id']}/reset-password", headers=bearer(rec)).status_code == 403
+    assert client.patch(f"{API}/admin/staff/{target['id']}", headers=bearer(rec), json={"isActive": False}).status_code == 403
+    assert client.patch(f"{API}/admin/staff/{me['id']}", headers=bearer(admin), json={"isActive": False}).status_code == 400
+    assert client.post(f"{API}/admin/staff/{me['id']}/reset-password", headers=bearer(admin)).status_code == 400
+
+
+def test_admin_changes_role_and_deactivates(client):
+    admin = admin_token(client)
+    ready_staff(client, admin, "recruiter", "mover@corp.com", "Recruiter", final_password="Harbor-Lantern-77")
+    user = next(u for u in client.get(f"{API}/admin/staff", headers=bearer(admin)).json() if u["email"] == "mover@corp.com")
+
+    r = client.patch(f"{API}/admin/staff/{user['id']}", headers=bearer(admin), json={"role": "Proctor"})
+    assert r.status_code == 200 and r.json()["role"] == "Proctor"
+    assert login_step1(client, "recruiter", "mover@corp.com", "Harbor-Lantern-77").status_code == 401
+    assert login_step1(client, "proctor", "mover@corp.com", "Harbor-Lantern-77").status_code == 200
+
+    assert client.patch(f"{API}/admin/staff/{user['id']}", headers=bearer(admin), json={"isActive": False}).status_code == 200
+    assert login_step1(client, "proctor", "mover@corp.com", "Harbor-Lantern-77").status_code == 401
+
+
 def test_account_lockout(client):
-    client.post(f"{API}/auth/register", json={"name": "L", "email": "lock@corp.com", "password": "longenough1"})
+    admin = admin_token(client)
+    create_staff(client, admin, "Lock", "lock@corp.com", "Recruiter", password="Quiet-Orchard-9034")
     for _ in range(3):
-        assert client.post(f"{API}/auth/login", json={"email": "lock@corp.com", "password": "bad"}).status_code == 401
-    r = client.post(f"{API}/auth/login", json={"email": "lock@corp.com", "password": "longenough1"})
-    assert r.status_code == 429
+        assert login_step1(client, "recruiter", "lock@corp.com", "bad").status_code == 401
+    assert login_step1(client, "recruiter", "lock@corp.com", "Quiet-Orchard-9034").status_code == 429
 
 
 # ----------------------------------------------------------- refresh / logout
 def test_refresh_rotation_and_reuse_detection(client):
     with TestClient(app) as c:
-        ch = c.post(f"{API}/auth/login", json=ADMIN).json()
-        c.post(f"{API}/auth/verify-otp", json={"challengeId": ch["challengeId"], "otp": ch["devOtp"]})
+        portal_login(c, "admin", **ADMIN)
         old_cookie = c.cookies.get("nexus_refresh")
         assert old_cookie
 
-        r = c.post(f"{API}/auth/refresh")
+        r = c.post(f"{API}/admin/auth/refresh")
         assert r.status_code == 200
         new_cookie = c.cookies.get("nexus_refresh")
         assert new_cookie and new_cookie != old_cookie
-        assert c.get(f"{API}/auth/me", headers=bearer(r.json()["accessToken"])).status_code == 200
+        assert c.get(f"{API}/admin/auth/me", headers=bearer(r.json()["accessToken"])).status_code == 200
 
         # replaying the rotated token is rejected and kills the whole session family
-        c.cookies.set("nexus_refresh", old_cookie, path=f"{API}/auth")
-        assert c.post(f"{API}/auth/refresh").status_code == 401
-        c.cookies.set("nexus_refresh", new_cookie, path=f"{API}/auth")
-        assert c.post(f"{API}/auth/refresh").status_code == 401
+        c.cookies.set("nexus_refresh", old_cookie, path=API)
+        assert c.post(f"{API}/admin/auth/refresh").status_code == 401
+        c.cookies.set("nexus_refresh", new_cookie, path=API)
+        assert c.post(f"{API}/admin/auth/refresh").status_code == 401
+
+
+def test_refresh_is_portal_aware(client):
+    admin = admin_token(client)
+    ready_staff(client, admin, "recruiter", "cookie.rec@corp.com", "Recruiter", final_password="CookiePass123")
+    with TestClient(app) as c:
+        portal_login(c, "recruiter", "cookie.rec@corp.com", "CookiePass123")
+        # a recruiter session cannot be turned into an admin / proctor session...
+        assert c.post(f"{API}/admin/auth/refresh").status_code == 403
+        assert c.post(f"{API}/proctor/auth/refresh").status_code == 403
+        # ...and that attempt did not burn the session
+        assert c.post(f"{API}/recruiter/auth/refresh").status_code == 200
+
+    with TestClient(app) as c:  # an admin session restores at the admin portal only
+        portal_login(c, "admin", **ADMIN)
+        for portal in ("recruiter", "proctor"):
+            assert c.post(f"{API}/{portal}/auth/refresh").status_code == 403
+        assert c.post(f"{API}/admin/auth/refresh").status_code == 200
 
 
 def test_logout_revokes_refresh(client):
     with TestClient(app) as c:
-        ch = c.post(f"{API}/auth/login", json=ADMIN).json()
-        c.post(f"{API}/auth/verify-otp", json={"challengeId": ch["challengeId"], "otp": ch["devOtp"]})
+        portal_login(c, "admin", **ADMIN)
         cookie = c.cookies.get("nexus_refresh")
-        assert c.post(f"{API}/auth/logout").status_code == 200
-        c.cookies.set("nexus_refresh", cookie, path=f"{API}/auth")
-        assert c.post(f"{API}/auth/refresh").status_code == 401
-
-
-# ------------------------------------------------------------ password reset
-def test_password_reset_flow(client):
-    client.post(f"{API}/auth/register", json={"name": "P", "email": "pw@corp.com", "password": "oldpassword1"})
-    ch = client.post(f"{API}/auth/password-reset/request", json={"email": "pw@corp.com"}).json()
-    bad = client.post(f"{API}/auth/password-reset/confirm",
-                      json={"challengeId": ch["challengeId"], "otp": "000000", "newPassword": "newpassword1"})
-    assert bad.status_code == 401
-    ok = client.post(f"{API}/auth/password-reset/confirm",
-                     json={"challengeId": ch["challengeId"], "otp": ch["devOtp"], "newPassword": "newpassword1"})
-    assert ok.status_code == 200
-    assert client.post(f"{API}/auth/login", json={"email": "pw@corp.com", "password": "oldpassword1"}).status_code == 401
-    staff_login(client, "pw@corp.com", "newpassword1")
-
-
-def test_password_reset_does_not_reveal_unknown_email(client):
-    r = client.post(f"{API}/auth/password-reset/request", json={"email": "ghost@corp.com"})
-    assert r.status_code == 200
-    assert r.json().get("devOtp") is None
-    r2 = client.post(f"{API}/auth/password-reset/confirm",
-                     json={"challengeId": r.json()["challengeId"], "otp": "123456", "newPassword": "newpassword1"})
-    assert r2.status_code == 401
+        assert c.post(f"{API}/admin/auth/logout").status_code == 200
+        c.cookies.set("nexus_refresh", cookie, path=API)
+        assert c.post(f"{API}/admin/auth/refresh").status_code == 401
 
 
 # ---------------------------------------------------------------- candidates
-def create_invite(client, token):
-    r = client.post(f"{API}/auth/candidate/invites", headers=bearer(token),
+_invite_recruiters = 0
+
+
+def create_invite(client, admin):
+    """Invites need a Recruiter (admins cannot invite): the admin makes one, who then sends the invite."""
+    global _invite_recruiters
+    _invite_recruiters += 1
+    token = ready_staff(client, admin, "recruiter", f"invite.rec{_invite_recruiters}@corp.com", "Recruiter")
+    r = client.post(f"{API}/recruiter/candidates/invites", headers=bearer(token),
                     json={"name": "Marcus", "email": "marcus@example.com", "assessmentId": "assess-101"})
     assert r.status_code == 201, r.text
     return r.json()
 
 
 def test_candidate_invite_requires_staff(client):
-    r = client.post(f"{API}/auth/candidate/invites",
+    r = client.post(f"{API}/recruiter/candidates/invites",
                     json={"name": "M", "email": "m@example.com", "assessmentId": "assess-101"})
     assert r.status_code == 401
 
 
 def test_candidate_flow_and_scoping(client, no_real_email):
-    admin = staff_login(client)
+    admin = admin_token(client)
     inv = create_invite(client, admin)
     assert no_real_email  # an email was dispatched server-side
     invite_token = inv["link"].split("invite=")[1]
 
-    # wrong OTP / wrong token
-    assert client.post(f"{API}/auth/candidate/verify",
+    assert client.post(f"{API}/candidate/verify",
                        json={"inviteToken": invite_token, "otp": "000000"}).status_code == 401
-    assert client.post(f"{API}/auth/candidate/verify",
+    assert client.post(f"{API}/candidate/verify",
                        json={"inviteToken": "bogus", "otp": inv["devOtp"]}).status_code == 401
 
-    r = client.post(f"{API}/auth/candidate/verify", json={"inviteToken": invite_token, "otp": inv["devOtp"]})
+    r = client.post(f"{API}/candidate/verify", json={"inviteToken": invite_token, "otp": inv["devOtp"]})
     assert r.status_code == 200, r.text
     cand_token = r.json()["accessToken"]
     assert r.json()["candidate"]["assessmentId"] == "assess-101"
 
     # candidate token is NOT a staff token
-    assert client.get(f"{API}/auth/me", headers=bearer(cand_token)).status_code == 401
-    assert client.get(f"{API}/auth/staff", headers=bearer(cand_token)).status_code == 401
-    assert client.post(f"{API}/auth/candidate/invites", headers=bearer(cand_token),
+    for path in ("/admin/auth/me", "/recruiter/auth/me", "/proctor/auth/me", "/admin/staff"):
+        assert client.get(f"{API}{path}", headers=bearer(cand_token)).status_code == 401
+    assert client.post(f"{API}/recruiter/candidates/invites", headers=bearer(cand_token),
                        json={"name": "M", "email": "m@example.com", "assessmentId": "x"}).status_code == 401
+    assert client.post(f"{API}/recruiter/send-email", headers=bearer(cand_token),
+                       json={"recipientEmail": "a@b.c", "subject": "s", "bodyHtml": "b"}).status_code == 401
     # but it may use candidate-allowed endpoints
     r = client.post(f"{API}/code/execute", headers=bearer(cand_token),
                     json={"language": "javascript", "code": "1", "testCases": []})
     assert r.status_code == 200
-    # and a staff token is not a candidate token
-    assert client.post(f"{API}/send-email", headers=bearer(cand_token),
-                       json={"recipientEmail": "a@b.c", "subject": "s", "bodyHtml": "b"}).status_code == 401
 
 
 def test_candidate_otp_resend(client):
-    admin = staff_login(client)
+    admin = admin_token(client)
     inv = create_invite(client, admin)
     token = inv["link"].split("invite=")[1]
-    r = client.post(f"{API}/auth/candidate/resend-otp", json={"inviteToken": token})
+    r = client.post(f"{API}/candidate/resend-otp", json={"inviteToken": token})
     assert r.status_code == 200
     new = r.json()["devOtp"]
-    # old OTP dead, new one works
-    assert client.post(f"{API}/auth/candidate/verify", json={"inviteToken": token, "otp": inv["devOtp"]}).status_code in (401,) or inv["devOtp"] == new
-    assert client.post(f"{API}/auth/candidate/verify", json={"inviteToken": token, "otp": new}).status_code == 200
+    assert client.post(f"{API}/candidate/verify", json={"inviteToken": token, "otp": inv["devOtp"]}).status_code in (401,) or inv["devOtp"] == new
+    assert client.post(f"{API}/candidate/verify", json={"inviteToken": token, "otp": new}).status_code == 200
 
 
 # ----------------------------------------------------------------- websocket
@@ -263,14 +440,70 @@ def test_websocket_requires_valid_token_and_scopes_events(client):
         with client.websocket_connect("/ws/proctoring?token=garbage"):
             pass
 
-    admin = staff_login(client)
+    admin = admin_token(client)
+    proctor = ready_staff(client, admin, "proctor", "ws.proctor@corp.com", "Proctor", final_password="ProctorPass123")
     inv = create_invite(client, admin)
     itoken = inv["link"].split("invite=")[1]
-    cand = client.post(f"{API}/auth/candidate/verify", json={"inviteToken": itoken, "otp": inv["devOtp"]}).json()["accessToken"]
+    cand = client.post(f"{API}/candidate/verify", json={"inviteToken": itoken, "otp": inv["devOtp"]}).json()["accessToken"]
 
-    with client.websocket_connect(f"/ws/proctoring?token={admin}") as monitor:
+    # the Proctor receives the stream
+    with client.websocket_connect(f"/ws/proctoring?token={proctor}") as p_ws:
         with client.websocket_connect(f"/ws/proctoring?token={cand}") as cws:
             cws.send_json({"candidateId": "someone-else", "event": "Tab Switch", "severity": "high"})
-            msg = monitor.receive_json()
+            msg = p_ws.receive_json()
             assert msg["candidateId"] == inv["candidateId"]  # spoofed id ignored
             assert msg["event"] == "Tab Switch"
+
+
+def test_only_proctor_receives_proctoring_stream():
+    import asyncio
+
+    from app.api.proctor import ConnectionManager
+
+    class FakeSocket:
+        def __init__(self):
+            self.received = []
+
+        async def send_json(self, message):
+            self.received.append(message)
+
+    manager = ConnectionManager()
+    sockets = {role: FakeSocket() for role in ("Proctor", "System Admin", "Recruiter")}
+    for role, ws in sockets.items():
+        manager.active_connections.append((ws, {"kind": "staff", "id": role, "role": role}))
+    candidate = FakeSocket()
+    manager.active_connections.append((candidate, {"kind": "candidate", "id": "c1", "role": "Candidate"}))
+
+    asyncio.run(manager.broadcast_to_monitors({"type": "PROCTORING_EVENT"}))
+
+    assert len(sockets["Proctor"].received) == 1
+    assert sockets["System Admin"].received == []  # admins manage people, they do not proctor
+    assert sockets["Recruiter"].received == []
+    assert candidate.received == []
+
+
+# ------------------------------------------------------------------- migration
+def test_legacy_roles_are_migrated(client):
+    from app.db.session import SessionLocal
+    from app.models.auth import StaffUser
+    from app.core.security import hash_password
+    from app.services.bootstrap import init_auth_db
+
+    db = SessionLocal()
+    try:
+        db.add(StaffUser(email="old.admin@corp.com", otp_email="old.admin@corp.com", full_name="Old",
+                         role="Admin", password_hash=hash_password("whatever1234")))
+        db.add(StaffUser(email="old.super@corp.com", otp_email="old.super@corp.com", full_name="Old2",
+                         role="Super Admin", password_hash=hash_password("whatever1234")))
+        db.commit()
+    finally:
+        db.close()
+
+    init_auth_db()
+
+    db = SessionLocal()
+    try:
+        roles = {u.email: u.role for u in db.query(StaffUser).filter(StaffUser.email.like("old.%")).all()}
+    finally:
+        db.close()
+    assert roles == {"old.admin@corp.com": "System Admin", "old.super@corp.com": "System Admin"}
