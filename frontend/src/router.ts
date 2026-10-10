@@ -10,7 +10,8 @@ import { Portal, StaffRole } from './types';
  *   /admin/staff-management           Staff Management
  *   /admin/global-system-settings     Global System Settings
  *   /admin/audit-logs                 Audit Logs
- *   /recruiter                        Recruiter portal
+ *   /recruiter                        Recruiter login
+ *   /recruiter/hiringpipeline         Hiring Pipeline (default after sign-in)
  *   /proctor                          Live proctoring portal
  */
 export const PORTALS: Portal[] = ['admin', 'recruiter', 'proctor'];

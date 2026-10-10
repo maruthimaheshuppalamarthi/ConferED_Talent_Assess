@@ -13,6 +13,8 @@ from app.db.session import SessionLocal, engine
 from app.models.auth import AuthBase, StaffUser, SystemSetting, utcnow
 from app.services import audit
 from app.services import auth_core as core
+from app.services.question_bank import ensure_question_categories
+from app.services.recruiter_seed import seed_recruiter_demo
 
 logger = logging.getLogger("nexus.bootstrap")
 
@@ -152,7 +154,9 @@ def init_auth_db() -> None:
     try:
         _migrate_legacy_roles(db)
         seed_default_settings(db)
+        ensure_question_categories(db)
         ensure_seed_admin(db)
+        seed_recruiter_demo(db)
         if settings.APP_ENV != "test":  # tests deliberately use a known admin password
             enforce_admin_password_policy(db)
     finally:

@@ -46,14 +46,15 @@ export interface TestCase {
   weight: number;
 }
 
-export type QuestionType = 
-  | 'mcq' 
-  | 'msq' 
-  | 'true_false' 
-  | 'fill_blank' 
-  | 'essay' 
-  | 'coding' 
-  | 'sql';
+export type QuestionType =
+  | 'mcq'
+  | 'msq'
+  | 'true_false'
+  | 'fill_blank'
+  | 'essay'
+  | 'coding'
+  | 'sql'
+  | 'drag_drop';
 
 export interface Question {
   id: string;
@@ -70,7 +71,28 @@ export interface Question {
   difficulty: 'easy' | 'medium' | 'hard';
   points: number;
   category: string;
+  sectionCategory?: string;
+  jobRole?: string | null;
+  /** Set when the question belongs to one job's bank. Empty for the company library. */
+  jobId?: string | null;
+  selectionMode?: 'single' | 'multi';
+  stemFormat?: 'plain' | 'markdown';
+  codingMeta?: Record<string, unknown>;
+  constraints?: string;
+  ioFormat?: string;
+  timeLimitMs?: number;
+  memoryLimitKb?: number;
+  rubric?: string;
+  status?: 'draft' | 'published';
   tags: string[];
+}
+
+export interface QuestionCategory {
+  id: string;
+  label: string;
+  allowedTypes: string[];
+  sortOrder: number;
+  jobId?: string | null;
 }
 
 export interface Section {
@@ -83,6 +105,11 @@ export interface Section {
   questions: Question[];
   isMandatory: boolean;
   randomizeQuestions?: boolean;
+  allowedTypes?: string[];
+  allowedCategories?: string[];
+  poolSize?: number;
+  pickCount?: number | null;
+  jobRole?: string | null;
 }
 
 export interface Assessment {

@@ -161,17 +161,56 @@ def staff_credentials_email(name: str, login_url: str, email: str, temp_password
     return subject, body
 
 
-def candidate_invite_email(name: str, link: str, code: str, minutes: int, expires_label: str) -> tuple:
-    subject = f"Assessment Invitation - OTP [{code}]"
+def candidate_invite_email(
+    name: str,
+    link: str,
+    code: str,
+    minutes: int,
+    expires_label: str,
+    *,
+    assessment_title: str = "Online Assessment",
+    duration_minutes: int = 60,
+    deadline_label: str = "",
+    guidelines: str = "",
+) -> tuple:
+    """Invitation with duration, deadline, unique link, and Begin Assessment CTA."""
+    subject = f"Invitation: {assessment_title}"
+    guide = guidelines or (
+        "Find a quiet place with a stable internet connection. Keep your camera on if required. "
+        "Do not share this personal link. After the deadline the link will no longer work."
+    )
+    deadline_row = (
+        f'<tr><td style="padding:6px 0;color:#94a3b8;font-size:13px;">Deadline</td>'
+        f'<td style="padding:6px 0;color:#e2e8f0;font-size:13px;font-weight:600;text-align:right;">{escape(deadline_label)}</td></tr>'
+        if deadline_label else ""
+    )
     body = _shell(
         f"Hello {escape(name)},",
-        f"""<p style="color: #94a3b8; font-size: 14px; line-height: 1.6;">You have been invited to take an online assessment.
-        Open your personal link below and enter this one-time passcode when asked:</p>
+        f"""<p style="color: #94a3b8; font-size: 14px; line-height: 1.6;">
+        You have been invited to complete <strong style="color:#e2e8f0">{escape(assessment_title)}</strong>.</p>
+        <table style="width:100%;border-collapse:collapse;margin:16px 0;background:#0f172a;border-radius:10px;padding:12px;">
+          <tr><td style="padding:6px 0;color:#94a3b8;font-size:13px;">Assessment time</td>
+              <td style="padding:6px 0;color:#e2e8f0;font-size:13px;font-weight:600;text-align:right;">{int(duration_minutes)} minutes</td></tr>
+          {deadline_row}
+          <tr><td style="padding:6px 0;color:#94a3b8;font-size:13px;">Link expires</td>
+              <td style="padding:6px 0;color:#e2e8f0;font-size:13px;font-weight:600;text-align:right;">{escape(expires_label)}</td></tr>
+        </table>
+        <p style="color: #94a3b8; font-size: 14px; line-height: 1.6;">Use your unique link below. When prompted, enter this one-time passcode:</p>
         {_otp_box(code)}
-        <div style="margin: 24px 0;">
-          <a href="{escape(link)}" target="_blank" style="background-color: #2563eb; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 10px; font-weight: bold; font-size: 14px; display: inline-block;">BEGIN ONLINE ASSESSMENT</a>
+        <div style="margin: 28px 0; text-align: center;">
+          <a href="{escape(link)}" target="_blank"
+             style="background-color: #2563eb; color: #ffffff; padding: 14px 32px; text-decoration: none;
+                    border-radius: 10px; font-weight: bold; font-size: 15px; display: inline-block;">
+            BEGIN ASSESSMENT
+          </a>
         </div>
-        <p style="color: #64748b; font-size: 12px;">The passcode is valid for {minutes} minutes after it is issued; the link expires {escape(expires_label)}. This link is personal - do not share it.</p>""",
+        <p style="color: #64748b; font-size: 12px; word-break: break-all;">
+          Unique link: <a href="{escape(link)}" style="color:#60a5fa;">{escape(link)}</a>
+        </p>
+        <p style="color: #64748b; font-size: 12px; line-height: 1.5; margin-top: 16px;">
+          <strong style="color:#94a3b8;">Guidelines:</strong> {escape(guide)}
+          The passcode is valid for {minutes} minutes after issue. This link is personal — do not forward it.
+        </p>""",
     )
     return subject, body
 

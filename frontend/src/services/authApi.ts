@@ -61,6 +61,8 @@ export interface InviteResult {
   link: string;
   expiresAt: string;
   otpDestination: string;
+  assessmentTitle?: string | null;
+  durationMinutes?: number | null;
   devOtp?: string | null;
 }
 
@@ -88,11 +90,13 @@ function errorMessage(body: any, status: number): string {
   return `Request failed (${status})`;
 }
 
-async function rawRequest(path: string, method: string, body: unknown, mode: AuthMode): Promise<Response> {
+async function rawRequest(path: string, method: string, body: unknown, mode: AuthMode, timeoutMs = 0): Promise<Response> {
   const headers: Record<string, string> = {};
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   const token = mode === 'staff' ? staffToken : mode === 'candidate' ? candidateToken : null;
   if (token) headers['Authorization'] = `Bearer ${token}`;
+  const ctrl = timeoutMs > 0 ? new AbortController() : null;
+  const timer = ctrl ? window.setTimeout(() => ctrl.abort(), timeoutMs) : 0;
 
   try {
     return await fetch(`${API}${path}`, {
@@ -100,9 +104,12 @@ async function rawRequest(path: string, method: string, body: unknown, mode: Aut
       headers,
       credentials: 'include',
       body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal: ctrl?.signal,
     });
   } catch {
     throw new ApiError(0, 'Cannot reach the server. Make sure the backend is running.');
+  } finally {
+    if (timer) window.clearTimeout(timer);
   }
 }
 
@@ -136,7 +143,7 @@ async function refreshSession(portal: Portal): Promise<StaffSession | null> {
   if (!refreshInFlight) {
     refreshInFlight = (async () => {
       try {
-        const res = await rawRequest(`/${portal}/auth/refresh`, 'POST', undefined, 'none');
+        const res = await rawRequest(`/${portal}/auth/refresh`, 'POST', undefined, 'none', 8000);
         if (!res.ok) return null;
         const session = (await res.json()) as StaffSession;
         staffToken = session.accessToken;
@@ -250,4 +257,28 @@ export const authApi = {
   /** Authenticated fetch helper for other API calls (adds the right bearer token). */
   fetchJson: <T>(path: string, method = 'GET', body?: unknown, mode: AuthMode = 'staff') =>
     request<T>(path, method, body, mode),
+
+  /** Multipart upload (do not set Content-Type; the browser adds the boundary). */
+  async uploadForm<T>(path: string, form: FormData, mode: AuthMode = 'staff'): Promise<T> {
+    const headers: Record<string, string> = {};
+    const token = mode === 'staff' ? staffToken : mode === 'candidate' ? candidateToken : null;
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    let res = await fetch(`${API}${path}`, { method: 'POST', headers, credentials: 'include', body: form });
+    if (res.status === 401 && mode === 'staff' && staffToken) {
+      const session = await refreshSession(activePortal);
+      if (session) {
+        const h2: Record<string, string> = {};
+        if (staffToken) h2['Authorization'] = `Bearer ${staffToken}`;
+        res = await fetch(`${API}${path}`, { method: 'POST', headers: h2, credentials: 'include', body: form });
+      } else {
+        handleSessionExpired();
+      }
+    }
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new ApiError(res.status, errorMessage(data, res.status));
+    }
+    if (res.status === 204) return undefined as T;
+    return res.json() as Promise<T>;
+  },
 };

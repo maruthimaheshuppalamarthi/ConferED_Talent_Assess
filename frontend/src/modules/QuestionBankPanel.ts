@@ -1,376 +1,721 @@
 import { CsvExporterService } from '../services/csvExporter';
-import { store } from '../services/store';
-import { Question } from '../types';
+import { ApiError } from '../services/authApi';
+import { BulkQuestionImportResult, JobItem, JobRoleItem, recruiterApi } from '../services/recruiterApi';
+import { Question, QuestionCategory, Section } from '../types';
 
-/** Question Bank (Recruiter portal): create, edit, delete and export questions. */
+const SECTIONS = ['Quantitative Aptitude', 'Logical Reasoning', 'English', 'Technical'];
+const CATEGORIES: { label: string; type: Question['type'] }[] = [
+  { label: 'MCQ', type: 'mcq' },
+  { label: 'Theory', type: 'essay' },
+  { label: 'Coding', type: 'coding' },
+];
+
+const categoryLabel = (type: string) =>
+  CATEGORIES.find(c => c.type === type)?.label
+  || (type === 'msq' ? 'MCQ' : type === 'sql' ? 'Coding' : type);
+
+/** Company library, or one job's question bank when jobId is set. */
 export class QuestionBankPanel {
   private container: HTMLElement;
+  private jobId: string;
+  private jobTitle: string;
+  private questions: Question[] = [];
+  private categories: QuestionCategory[] = [];
+  private jobs: JobItem[] = [];
+  private jobRoles: JobRoleItem[] = [];
+  private filterCategory = '';
+  private filterType = '';
+  private filterJobId = '';
+  private loading = true;
+  private error = '';
 
-  constructor(container: HTMLElement) {
+  constructor(container: HTMLElement, scope?: { jobId: string; jobTitle?: string }) {
     this.container = container;
+    this.jobId = scope?.jobId || '';
+    this.jobTitle = scope?.jobTitle || '';
   }
 
   public render() {
-    const state = store.getState();
-    this.container.innerHTML = `
-        <div class="glass-panel p-6 rounded-3xl border border-slate-800 space-y-6">
-          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-4">
-            <div>
-              <h2 class="text-lg font-bold text-white">Question Repository & Versioning</h2>
-              <p class="text-xs text-slate-400">Add, modify, edit, or delete coding challenges, SQL queries, MCQs, and essay topics.</p>
-            </div>
-            <div class="flex items-center gap-2">
-              <button id="export-q-csv-btn" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-emerald-400 font-bold text-xs border border-slate-700 transition-all">
-                📥 Export CSV (.csv)
-              </button>
-              <button id="create-q-btn" class="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-md flex items-center gap-1.5">
-                <span>+</span> Create Question
-              </button>
-            </div>
-          </div>
+    void this.load();
+    this.paint();
+  }
 
-          <div class="space-y-3">
-            ${state.questionBank.map(q => `
-              <div class="p-4 rounded-2xl bg-slate-900 border border-slate-800 flex items-center justify-between">
-                <div>
-                  <div class="flex items-center gap-2">
-                    <span class="px-2 py-0.5 text-[10px] font-bold rounded uppercase ${
-                      q.type === 'coding' ? 'bg-blue-500/20 text-blue-300' :
-                      q.type === 'sql' ? 'bg-purple-500/20 text-purple-300' :
-                      q.type === 'essay' ? 'bg-amber-500/20 text-amber-300' :
-                      'bg-emerald-500/20 text-emerald-300'
-                    }">${q.type}</span>
-                    <h4 class="text-xs font-bold text-white">${q.title}</h4>
-                  </div>
-                  <p class="text-xs text-slate-300 mt-1.5 font-sans">${q.content || q.title}</p>
-                  <p class="text-[11px] text-slate-400 mt-1">${q.category} • Difficulty: ${q.difficulty} • Points: ${q.points}</p>
-                </div>
-                <div class="flex items-center gap-2 text-xs">
-                  <span class="px-2 py-1 bg-slate-950 text-slate-400 rounded font-mono hidden md:inline">${q.tags.join(', ')}</span>
-                  <button data-q-edit="${q.id}" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-blue-400 font-bold text-xs border border-slate-700 flex items-center gap-1">
-                    ✏️ Edit
-                  </button>
-                  <button data-q-del="${q.id}" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-red-950/40 text-slate-400 hover:text-red-400 font-bold text-xs border border-slate-700 flex items-center gap-1">
-                    🗑️ Delete
-                  </button>
-                </div>
-              </div>
-            `).join('')}
+  private async load(): Promise<void> {
+    this.loading = true;
+    this.error = '';
+    this.paint();
+    try {
+      const [qData, cats, jobs] = await Promise.all([
+        this.jobId
+          ? recruiterApi.jobQuestions(this.jobId, {
+            category: this.filterCategory || undefined,
+            type: this.filterType || undefined,
+          })
+          : recruiterApi.questions({
+            category: this.filterCategory || undefined,
+            type: this.filterType || undefined,
+            scope: 'all',
+          }),
+        recruiterApi.questionCategories(),
+        recruiterApi.jobs(),
+      ]);
+      this.questions = this.filterJobId && !this.jobId
+        ? qData.items.filter(q => q.jobId === this.filterJobId)
+        : qData.items;
+      this.categories = cats.items;
+      this.jobs = jobs.items || [];
+    } catch (e) {
+      this.error = e instanceof ApiError ? e.message : 'Could not load questions.';
+      this.questions = [];
+    } finally {
+      this.loading = false;
+      this.paint();
+    }
+  }
+
+  private paint() {
+    if (this.loading) {
+      this.container.innerHTML = `<p class="text-xs text-slate-500 font-mono py-8">Loading question bank…</p>`;
+      return;
+    }
+
+    this.container.innerHTML = `
+      <div class="glass-panel p-6 rounded-3xl border border-slate-800 space-y-6">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-4">
+          <div>
+            <h2 class="text-lg font-bold text-white">${this.jobId ? `${esc(this.jobTitle || 'Job')} question bank` : 'Question Bank'}</h2>
+            <p class="text-xs text-slate-400">Create a question, choose its section and category, and assign it to a job (${this.questions.length}).</p>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            ${this.jobId ? '' : `<button id="bulk-q-btn" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-blue-300 font-bold text-xs border border-slate-700">Bulk upload</button>`}
+            <button id="export-q-csv-btn" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-emerald-400 font-bold text-xs border border-slate-700">Export CSV</button>
+            <button id="create-q-btn" class="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-md">+ Create Question</button>
           </div>
         </div>
-      <div id="admin-modal-host"></div>
-    `;
+
+        <div class="flex flex-wrap gap-2 items-center">
+          <button data-section="" class="filter-section px-3 py-1.5 rounded-lg text-[11px] font-bold border ${!this.filterCategory ? 'bg-blue-600 text-white border-blue-500' : 'bg-slate-900 text-slate-400 border-slate-700'}">All sections</button>
+          ${SECTIONS.map(name => `
+            <button data-section="${esc(name)}" class="filter-section px-3 py-1.5 rounded-lg text-[11px] font-bold border ${this.filterCategory === name ? 'bg-blue-600 text-white border-blue-500' : 'bg-slate-900 text-slate-400 border-slate-700'}">${esc(name)}</button>
+          `).join('')}
+        </div>
+        <div class="flex flex-wrap gap-2">
+          <button data-type="" class="filter-type px-3 py-1.5 rounded-lg text-[11px] font-bold border ${!this.filterType ? 'bg-indigo-600 text-white border-indigo-500' : 'bg-slate-900 text-slate-400 border-slate-700'}">All categories</button>
+          ${CATEGORIES.map(c => `
+            <button data-type="${c.type}" class="filter-type px-3 py-1.5 rounded-lg text-[11px] font-bold border ${this.filterType === c.type ? 'bg-indigo-600 text-white border-indigo-500' : 'bg-slate-900 text-slate-400 border-slate-700'}">${c.label}</button>
+          `).join('')}
+        </div>
+        ${this.jobs.length ? `
+          <div class="flex flex-wrap gap-2">
+            <button data-job="" class="filter-job px-3 py-1.5 rounded-lg text-[11px] font-bold border ${!this.filterJobId ? 'bg-violet-600 text-white border-violet-500' : 'bg-slate-900 text-slate-400 border-slate-700'}">All jobs</button>
+            ${this.jobs.map(j => `
+              <button data-job="${esc(j.id)}" class="filter-job px-3 py-1.5 rounded-lg text-[11px] font-bold border ${this.filterJobId === j.id ? 'bg-violet-600 text-white border-violet-500' : 'bg-slate-900 text-slate-400 border-slate-700'}">${esc(j.title)}</button>
+            `).join('')}
+          </div>
+        ` : ''}
+
+        ${this.error ? `<p class="text-xs text-red-400 font-semibold">${esc(this.error)}</p>` : ''}
+        <div class="space-y-3">
+          ${this.questions.map(q => `
+            <div class="p-4 rounded-2xl bg-slate-900 border border-slate-800 flex items-center justify-between gap-3">
+              <div class="min-w-0">
+                <div class="flex items-center gap-2">
+                  <span class="px-2 py-0.5 text-[10px] font-bold rounded uppercase ${typeTone(q.type)}">${esc(q.type)}</span>
+                  <h4 class="text-xs font-bold text-white truncate">${esc(q.title)}</h4>
+                </div>
+                <p class="text-xs text-slate-300 mt-1.5 line-clamp-2">${esc(q.content || q.title)}</p>
+                <p class="text-[11px] text-slate-400 mt-1">${esc(q.sectionCategory || 'No section')} • ${esc(categoryLabel(q.type))} • ${esc(this.jobName(q) || 'Not assigned')} • ${esc(q.difficulty)} • ${q.points} pts</p>
+              </div>
+              <div class="flex items-center gap-2 shrink-0">
+                <button data-q-edit="${q.id}" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-blue-400 font-bold text-xs border border-slate-700">Edit</button>
+                <button data-q-del="${q.id}" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-red-950/40 text-slate-400 hover:text-red-400 font-bold text-xs border border-slate-700">Delete</button>
+              </div>
+            </div>`).join('') || '<p class="text-xs text-slate-500">No questions yet.</p>'}
+        </div>
+      </div>
+      <div id="admin-modal-host"></div>`;
+
     this.attachEvents();
   }
 
   private attachEvents() {
-    // Question Bank Actions
-    this.container.querySelector('#create-q-btn')?.addEventListener('click', () => {
-      this.renderQuestionModal();
+    this.container.querySelector('#create-q-btn')?.addEventListener('click', () => this.renderQuestionModal());
+    this.container.querySelector('#bulk-q-btn')?.addEventListener('click', () => this.renderBulkUploadModal());
+    this.container.querySelectorAll('[data-cat-del]').forEach(btn => {
+      btn.addEventListener('click', e => {
+        e.stopPropagation();
+        const id = (e.currentTarget as HTMLElement).getAttribute('data-cat-del');
+        if (id && this.jobId && confirm('Delete this category?')) void this.removeCategory(id);
+      });
     });
-
+    this.container.querySelectorAll('.filter-section').forEach(btn => {
+      btn.addEventListener('click', e => {
+        this.filterCategory = (e.currentTarget as HTMLElement).getAttribute('data-section') || '';
+        void this.load();
+      });
+    });
+    this.container.querySelectorAll('.filter-type').forEach(btn => {
+      btn.addEventListener('click', e => {
+        this.filterType = (e.currentTarget as HTMLElement).getAttribute('data-type') || '';
+        void this.load();
+      });
+    });
+    this.container.querySelectorAll('.filter-job').forEach(btn => {
+      btn.addEventListener('click', e => {
+        this.filterJobId = (e.currentTarget as HTMLElement).getAttribute('data-job') || '';
+        void this.load();
+      });
+    });
     this.container.querySelectorAll('[data-q-edit]').forEach(btn => {
-      btn.addEventListener('click', (e) => {
-        const qId = (e.currentTarget as HTMLElement).getAttribute('data-q-edit');
-        const q = store.getState().questionBank.find(item => item.id === qId);
+      btn.addEventListener('click', e => {
+        const id = (e.currentTarget as HTMLElement).getAttribute('data-q-edit');
+        const q = this.questions.find(item => item.id === id);
         if (q) this.renderQuestionModal(q);
       });
     });
-
     this.container.querySelectorAll('[data-q-del]').forEach(btn => {
-      btn.addEventListener('click', (e) => {
-        const qId = (e.currentTarget as HTMLElement).getAttribute('data-q-del');
-        if (qId && confirm('Are you sure you want to delete this question from the Question Bank?')) {
-          store.deleteQuestion(qId);
-          this.render();
-        }
+      btn.addEventListener('click', e => {
+        const id = (e.currentTarget as HTMLElement).getAttribute('data-q-del');
+        if (id && confirm('Delete this question?')) void this.remove(id);
       });
     });
-
     this.container.querySelector('#export-q-csv-btn')?.addEventListener('click', () => {
-      const state = store.getState();
-      const headers = ['Question Title', 'Type', 'Category', 'Difficulty', 'Points', 'Tags'];
-      const rows = state.questionBank.map(q => [q.title, q.type, q.category, q.difficulty, q.points, q.tags.join('; ')]);
+      const headers = ['Title', 'Type', 'Category', 'Difficulty', 'Points', 'Tags'];
+      const rows = this.questions.map(q => [
+        q.title, q.type, q.sectionCategory || q.category, q.difficulty, q.points, (q.tags || []).join('; '),
+      ]);
       CsvExporterService.downloadCsv('Question_Bank_Export.csv', headers, rows);
     });
   }
 
-  /**
-   * Question Modal Handler (Create / Modify / Edit Question)
-   */
+  private jobName(q: Question): string {
+    return this.jobs.find(j => j.id === q.jobId)?.title || q.jobRole || '';
+  }
+
+  private async removeCategory(id: string) {
+    if (!this.jobId) return;
+    try {
+      await recruiterApi.deleteJobCategory(this.jobId, id);
+      if (this.categories.find(c => c.id === id)?.label === this.filterCategory) this.filterCategory = '';
+      await this.load();
+    } catch (e) {
+      alert(e instanceof ApiError ? e.message : 'Could not delete the category.');
+    }
+  }
+
+  private renderSectionModal() {
+    const host = this.container.querySelector('#admin-modal-host') as HTMLElement;
+    if (!host) return;
+    if (!this.jobs.length) {
+      alert('Create a job in the Assessment Builder first.');
+      return;
+    }
+    host.innerHTML = `
+      <div class="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4">
+        <div class="glass-panel w-full max-w-md rounded-3xl border border-slate-800 p-6 space-y-5">
+          <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+            <h3 class="text-base font-extrabold text-white">Add section to a job</h3>
+            <button id="close-sec-bank" class="text-slate-400 hover:text-white font-bold">✕</button>
+          </div>
+          <form id="sec-bank-form" class="space-y-3 text-xs">
+            <div>
+              <label class="block font-semibold text-slate-300 mb-1">Job</label>
+              <select id="sec-job" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white">
+                ${this.jobs.map(j => `<option value="${esc(j.id)}">${esc(j.title)}</option>`).join('')}
+              </select>
+            </div>
+            <div>
+              <label class="block font-semibold text-slate-300 mb-1">Section name</label>
+              <input id="sec-name" required class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white" placeholder="e.g. Technical MCQs" />
+            </div>
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="block font-semibold text-slate-300 mb-1">Minutes</label>
+                <input id="sec-mins" type="number" value="15" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white" />
+              </div>
+              <div>
+                <label class="block font-semibold text-slate-300 mb-1">Cutoff</label>
+                <input id="sec-pass" type="number" value="10" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white" />
+              </div>
+            </div>
+            <div class="flex justify-end gap-3 pt-2">
+              <button type="button" id="close-sec-bank-2" class="px-4 py-2 rounded-xl bg-slate-800 text-slate-300 font-bold">Cancel</button>
+              <button type="submit" class="px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold">Add</button>
+            </div>
+          </form>
+        </div>
+      </div>`;
+    const close = () => { host.innerHTML = ''; };
+    host.querySelector('#close-sec-bank')?.addEventListener('click', close);
+    host.querySelector('#close-sec-bank-2')?.addEventListener('click', close);
+    host.querySelector('#sec-bank-form')?.addEventListener('submit', e => {
+      e.preventDefault();
+      const jobId = (host.querySelector('#sec-job') as HTMLSelectElement).value;
+      const name = (host.querySelector('#sec-name') as HTMLInputElement).value.trim();
+      const timeLimitMinutes = parseInt((host.querySelector('#sec-mins') as HTMLInputElement).value, 10) || 15;
+      const passingMarks = parseInt((host.querySelector('#sec-pass') as HTMLInputElement).value, 10) || 10;
+      if (!name) return;
+      void recruiterApi.createJobSection(jobId, { name, timeLimitMinutes, passingMarks }).then(() => {
+        close();
+        return this.load();
+      }).catch(err => {
+        alert(err instanceof ApiError ? err.message : 'Could not add the section.');
+      });
+    });
+  }
+
+  private renderCategoryModal() {
+    const host = this.container.querySelector('#admin-modal-host') as HTMLElement;
+    if (!host) return;
+    host.innerHTML = `
+      <div class="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4">
+        <div class="glass-panel w-full max-w-md rounded-3xl border border-slate-800 p-6 space-y-5">
+          <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+            <h3 class="text-base font-extrabold text-white">Add category</h3>
+            <button id="close-cat-modal" class="text-slate-400 hover:text-white font-bold">✕</button>
+          </div>
+          <form id="cat-form" class="space-y-3 text-xs">
+            <div>
+              <label class="block font-semibold text-slate-300 mb-1">Name</label>
+              <input id="cat-label" required class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white" placeholder="e.g. SQL" autocomplete="off" />
+            </div>
+            <div class="flex justify-end gap-3 pt-2">
+              <button type="button" id="close-cat-modal-2" class="px-4 py-2 rounded-xl bg-slate-800 text-slate-300 font-bold">Cancel</button>
+              <button type="submit" class="px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold">Add</button>
+            </div>
+          </form>
+        </div>
+      </div>`;
+    const close = () => { host.innerHTML = ''; };
+    host.querySelector('#close-cat-modal')?.addEventListener('click', close);
+    host.querySelector('#close-cat-modal-2')?.addEventListener('click', close);
+    host.querySelector('#cat-form')?.addEventListener('submit', e => {
+      e.preventDefault();
+      const label = (host.querySelector('#cat-label') as HTMLInputElement).value.trim();
+      if (!label) return;
+      const save = this.jobId
+        ? recruiterApi.createJobCategory(this.jobId, label)
+        : recruiterApi.createCategory(label);
+      void save.then(() => {
+        close();
+        return this.load();
+      }).catch(err => {
+        alert(err instanceof ApiError ? err.message : 'Could not add the category.');
+      });
+    });
+  }
+
+  private async remove(id: string) {
+    try {
+      await recruiterApi.deleteQuestion(id);
+      await this.load();
+    } catch (e) {
+      alert(e instanceof ApiError ? e.message : 'Delete failed.');
+    }
+  }
+
   private renderQuestionModal(q?: Question) {
     const host = this.container.querySelector('#admin-modal-host') as HTMLElement;
     if (!host) return;
-
+    if (this.jobId && !this.categories.length) {
+      alert('Add a category for this job first.');
+      return;
+    }
     const isEdit = !!q;
+    const opts = q?.options?.length ? q.options : [
+      { id: 'opt-a', text: '' }, { id: 'opt-b', text: '' },
+    ];
+    const cases = q?.testCases?.length ? q.testCases : [
+      { id: 'tc-1', input: '', expectedOutput: '', isHidden: false, weight: 1 },
+      { id: 'tc-2', input: '', expectedOutput: '', isHidden: true, weight: 1 },
+    ];
+    const catVal = q?.sectionCategory || q?.category || 'General';
 
     host.innerHTML = `
       <div class="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4">
-        <div class="glass-panel w-full max-w-xl max-h-[85vh] overflow-y-auto rounded-3xl border border-slate-800 p-6 sm:p-8 space-y-6 shadow-2xl">
+        <div class="glass-panel w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-3xl border border-slate-800 p-6 space-y-5">
           <div class="flex items-center justify-between border-b border-slate-800 pb-4">
-            <h3 class="text-lg font-extrabold text-white flex items-center gap-2">
-              <span>${isEdit ? '✏️ Modify Question' : '✨ Create New Question'}</span>
-            </h3>
+            <h3 class="text-lg font-extrabold text-white">${isEdit ? 'Modify Question' : 'Create Question'}</h3>
             <button id="close-q-modal-btn" class="text-slate-400 hover:text-white font-bold">✕</button>
           </div>
-
           <form id="q-form" class="space-y-4 text-xs">
             <div>
-              <label class="block font-semibold text-slate-300 mb-1">Question Title</label>
-              <input type="text" id="q-title" value="${q?.title || ''}" required class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white" placeholder="e.g. Python Memory Management" />
+              <label class="block font-semibold text-slate-300 mb-1">Title</label>
+              <input id="q-title" value="${esc(q?.title || '')}" required class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white" />
             </div>
-
             <div>
-              <label class="block font-semibold text-slate-300 mb-1">Full Question Problem Statement / Description</label>
-              <textarea id="q-content" rows="3" required class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white" placeholder="Enter full question instructions, scenario, or problem description for candidate...">${q?.content || q?.title || ''}</textarea>
+              <label class="block font-semibold text-slate-300 mb-1">Stem / Content</label>
+              <textarea id="q-content" rows="3" required class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white">${esc(q?.content || '')}</textarea>
             </div>
-
             <div class="grid grid-cols-2 gap-4">
               <div>
-                <label class="block font-semibold text-slate-300 mb-1">Question Type</label>
-                <select id="q-type" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white">
-                  <option value="mcq" ${q?.type === 'mcq' ? 'selected' : ''}>Multiple Choice (MCQ)</option>
-                  <option value="sql" ${q?.type === 'sql' ? 'selected' : ''}>SQL Database Query</option>
-                  <option value="coding" ${q?.type === 'coding' ? 'selected' : ''}>Algorithmic Coding</option>
-                  <option value="essay" ${q?.type === 'essay' ? 'selected' : ''}>Architectural Essay</option>
+                <label class="block font-semibold text-slate-300 mb-1">Section</label>
+                <select id="q-cat" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white">
+                  ${SECTIONS.map(name => `<option value="${esc(name)}" ${name === catVal ? 'selected' : ''}>${esc(name)}</option>`).join('')}
                 </select>
               </div>
-
-              <div>
-                <label class="block font-semibold text-slate-300 mb-1">Difficulty Level</label>
-                <select id="q-diff" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white">
-                  <option value="easy" ${q?.difficulty === 'easy' ? 'selected' : ''}>Easy</option>
-                  <option value="medium" ${q?.difficulty === 'medium' ? 'selected' : ''}>Medium</option>
-                  <option value="hard" ${q?.difficulty === 'hard' ? 'selected' : ''}>Hard</option>
-                </select>
-              </div>
-            </div>
-
-            <div class="grid grid-cols-2 gap-4">
               <div>
                 <label class="block font-semibold text-slate-300 mb-1">Category</label>
-                <input type="text" id="q-cat" value="${q?.category || 'Core Engineering'}" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white" />
-              </div>
-              <div>
-                <label class="block font-semibold text-slate-300 mb-1">Points / Weightage</label>
-                <input type="number" id="q-points" value="${q?.points || 15}" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white" />
+                <select id="q-type" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white">
+                  ${CATEGORIES.map(c => `<option value="${c.type}" ${q?.type === c.type || (!q && c.type === 'mcq') ? 'selected' : ''}>${c.label}</option>`).join('')}
+                </select>
               </div>
             </div>
-
-            <!-- Target Assessment Section Assignment -->
-            ${(() => {
-              const activeAssess = store.getActiveAssessment();
-              const existingSections = activeAssess?.sections || [];
-              let currentSecId = existingSections[0]?.id || '';
-              if (q) {
-                const foundSec = existingSections.find(s => s.questions.some(item => item.id === q.id));
-                if (foundSec) currentSecId = foundSec.id;
-              }
-
-              return `
-                <div class="space-y-2 p-4 rounded-2xl bg-slate-900 border border-slate-800">
-                  <label class="block font-semibold text-blue-400 mb-1">Target Assessment Section (Which section does this question belong to?)</label>
-                  <select id="q-section-select" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white font-semibold">
-                    ${existingSections.map(s => `
-                      <option value="${s.id}" ${currentSecId === s.id ? 'selected' : ''}>📂 ${s.name} (${s.questions.length} questions)</option>
-                    `).join('')}
-                    <option value="__NEW_SECTION__">➕ + Create New Section...</option>
-                  </select>
-
-                  <div id="new-section-name-box" class="pt-2 hidden space-y-1">
-                    <label class="block font-semibold text-purple-400">Enter New Assessment Section Name</label>
-                    <input type="text" id="q-new-section-input" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-purple-500/50 bg-slate-950 text-purple-300 font-semibold" placeholder="e.g. DevOps & Cloud Infrastructure" />
-                  </div>
-                </div>
-              `;
-            })()}
-
-            <!-- MCQ Options & Correct Answer Selection Section -->
-            <div id="mcq-options-container" class="space-y-3 p-4 rounded-2xl bg-slate-900 border border-slate-800" style="display: ${q?.type === 'mcq' || !q ? 'block' : 'none'}">
-              <h4 class="text-xs font-bold text-blue-400 uppercase tracking-wider">Multiple Choice Options & Correct Answer Configuration</h4>
-              <div class="grid grid-cols-2 gap-3">
-                <div>
-                  <label class="block font-semibold text-slate-300 mb-1">Option A</label>
-                  <input type="text" id="q-opt-0" value="${q?.options?.[0]?.text || 'Reference Counting & Generational GC'}" class="glass-input w-full px-3 py-2 rounded-xl border border-slate-700 bg-slate-950 text-white" />
-                </div>
-                <div>
-                  <label class="block font-semibold text-slate-300 mb-1">Option B</label>
-                  <input type="text" id="q-opt-1" value="${q?.options?.[1]?.text || 'Manual memory allocation with malloc and free'}" class="glass-input w-full px-3 py-2 rounded-xl border border-slate-700 bg-slate-950 text-white" />
-                </div>
-                <div>
-                  <label class="block font-semibold text-slate-300 mb-1">Option C</label>
-                  <input type="text" id="q-opt-2" value="${q?.options?.[2]?.text || 'Mark and sweep garbage collection only'}" class="glass-input w-full px-3 py-2 rounded-xl border border-slate-700 bg-slate-950 text-white" />
-                </div>
-                <div>
-                  <label class="block font-semibold text-slate-300 mb-1">Option D</label>
-                  <input type="text" id="q-opt-3" value="${q?.options?.[3]?.text || 'All of the above'}" class="glass-input w-full px-3 py-2 rounded-xl border border-slate-700 bg-slate-950 text-white" />
-                </div>
-              </div>
-
+            <div class="grid grid-cols-2 gap-4">
               <div>
-                <label class="block font-semibold text-emerald-400 mb-1">Select Correct Answer (Only Visible to Admin / Recruiter)</label>
-                <select id="q-correct-opt" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-emerald-500/50 bg-slate-950 text-emerald-300 font-bold">
-                  <option value="opt-1" ${q?.correctAnswers?.includes('opt-1') ? 'selected' : ''}>Option A (First Option)</option>
-                  <option value="opt-2" ${q?.correctAnswers?.includes('opt-2') ? 'selected' : ''}>Option B (Second Option)</option>
-                  <option value="opt-3" ${q?.correctAnswers?.includes('opt-3') ? 'selected' : ''}>Option C (Third Option)</option>
-                  <option value="opt-4" ${q?.correctAnswers?.includes('opt-4') || !q?.correctAnswers ? 'selected' : ''}>Option D (Fourth Option)</option>
+                <label class="block font-semibold text-slate-300 mb-1">Assign to job</label>
+                <select id="q-job" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white">
+                  <option value="">Not assigned</option>
+                  ${this.jobs.map(j => {
+                    const closed = j.status === 'closed';
+                    const selected = q?.jobId === j.id;
+                    if (closed && !selected) return '';
+                    return `<option value="${esc(j.id)}" ${selected ? 'selected' : ''} ${closed ? 'disabled' : ''}>${esc(j.title)}${closed ? ' (closed)' : ''}</option>`;
+                  }).join('')}
+                </select>
+              </div>
+            </div>
+            <p class="text-[11px] text-slate-500">Assigning a job shows this question in the Assessment Builder under the section and category you chose.</p>
+            <div class="grid grid-cols-3 gap-4">
+              <div>
+                <label class="block font-semibold text-slate-300 mb-1">Difficulty</label>
+                <select id="q-diff" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white">
+                  ${['easy', 'medium', 'hard'].map(d => `<option value="${d}" ${q?.difficulty === d ? 'selected' : ''}>${d}</option>`).join('')}
+                </select>
+              </div>
+              <div>
+                <label class="block font-semibold text-slate-300 mb-1">Points</label>
+                <input type="number" id="q-points" value="${q?.points || 10}" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white" />
+              </div>
+              <div>
+                <label class="block font-semibold text-slate-300 mb-1">Stem format</label>
+                <select id="q-stem" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white">
+                  <option value="plain" ${q?.stemFormat !== 'markdown' ? 'selected' : ''}>plain</option>
+                  <option value="markdown" ${q?.stemFormat === 'markdown' ? 'selected' : ''}>markdown</option>
                 </select>
               </div>
             </div>
 
-            <!-- Coding & SQL Test Cases Builder Container -->
-            <div id="coding-testcases-container" class="space-y-3 p-4 rounded-2xl bg-slate-900 border border-slate-800" style="display: ${q?.type === 'coding' || q?.type === 'sql' ? 'block' : 'none'}">
+            <div id="panel-mcq" class="space-y-3 hidden">
               <div class="flex items-center justify-between">
-                <h4 class="text-xs font-bold text-purple-400 uppercase tracking-wider">🧪 Coding Test Cases & Marks Weightage Configuration (5 Test Cases = 50 Marks)</h4>
+                <p class="font-semibold text-slate-300" id="opts-label">Options</p>
+                <button type="button" id="add-opt" class="text-blue-400 font-bold">+ Add</button>
               </div>
-              <p class="text-[11px] text-slate-400">Configure inputs, expected outputs, and individual test case marks for candidate evaluation.</p>
-
-              <div class="space-y-2 max-h-52 overflow-y-auto pr-1">
-                ${[0, 1, 2, 3, 4].map(idx => {
-                  const tc = q?.testCases?.[idx];
-                  const defaultInputs = ['[2, 7, 11, 15], 9', '[3, 2, 4], 6', '[3, 3], 6', '[1, 5, 8, 12], 20', '[-1, -2, -3, -4], -7'];
-                  const defaultOutputs = ['[0, 1]', '[1, 2]', '[0, 1]', '[2, 3]', '[2, 3]'];
-
-                  return `
-                    <div class="p-2.5 rounded-xl bg-slate-950 border border-slate-800 space-y-1.5 text-xs">
-                      <div class="flex items-center justify-between">
-                        <span class="font-bold text-slate-200">Test Case ${idx + 1}</span>
-                        <div class="flex items-center gap-2">
-                          <label class="text-[11px] text-slate-400">Marks / Weight:</label>
-                          <input type="number" id="tc-weight-${idx}" value="${tc?.weight || 10}" class="glass-input w-16 px-2 py-0.5 rounded border border-slate-700 bg-slate-900 text-emerald-400 font-mono font-bold text-right" />
-                          <span class="text-slate-400 text-[10px]">pts</span>
-                        </div>
-                      </div>
-                      <div class="grid grid-cols-2 gap-2">
-                        <input type="text" id="tc-input-${idx}" value="${tc?.input || defaultInputs[idx]}" class="glass-input w-full px-2.5 py-1.5 rounded-lg border border-slate-700 bg-slate-900 text-white font-mono text-[11px]" placeholder="Input (e.g. [2,7,11,15], 9)" />
-                        <input type="text" id="tc-output-${idx}" value="${tc?.expectedOutput || defaultOutputs[idx]}" class="glass-input w-full px-2.5 py-1.5 rounded-lg border border-slate-700 bg-slate-900 text-emerald-300 font-mono text-[11px]" placeholder="Expected Output (e.g. [0,1])" />
-                      </div>
-                    </div>
-                  `;
-                }).join('')}
+              <p id="drag-hint" class="text-[11px] text-slate-500 hidden">List items in the <b>correct order</b>. Candidates will reorder them via drag-and-drop (order is never shown to them).</p>
+              <div id="opts-list" class="space-y-2">
+                ${opts.map((o, i) => optionRow(o.id, o.text, (q?.correctAnswers || []).includes(o.id), i, q?.type === 'drag_drop')).join('')}
               </div>
             </div>
 
-            <div>
-              <label class="block font-semibold text-slate-300 mb-1">Tags (comma separated)</label>
-              <input type="text" id="q-tags" value="${q?.tags ? q.tags.join(', ') : 'Python, SQL, Architecture'}" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white" />
+            <div id="panel-coding" class="space-y-3 hidden">
+              <div>
+                <label class="block font-semibold text-slate-300 mb-1">Constraints</label>
+                <textarea id="q-constraints" rows="2" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white">${esc(q?.constraints || '')}</textarea>
+              </div>
+              <div>
+                <label class="block font-semibold text-slate-300 mb-1">I/O format</label>
+                <textarea id="q-io" rows="2" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white">${esc(q?.ioFormat || '')}</textarea>
+              </div>
+              <p class="font-semibold text-slate-300">Test cases (include ≥1 hidden for publish)</p>
+              <div id="tc-list" class="space-y-2">
+                ${cases.map((c, i) => tcRow(c, i)).join('')}
+              </div>
+              <button type="button" id="add-tc" class="text-blue-400 font-bold">+ Add test case</button>
+            </div>
+
+            <div id="panel-essay" class="space-y-3 hidden">
+              <div class="grid grid-cols-2 gap-4">
+                <div>
+                  <label class="block font-semibold text-slate-300 mb-1">Min words</label>
+                  <input type="number" id="q-minw" value="${q?.essayMinWords || 50}" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white" />
+                </div>
+                <div>
+                  <label class="block font-semibold text-slate-300 mb-1">Max words</label>
+                  <input type="number" id="q-maxw" value="${q?.essayMaxWords || 500}" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white" />
+                </div>
+              </div>
+              <div>
+                <label class="block font-semibold text-slate-300 mb-1">Rubric</label>
+                <textarea id="q-rubric" rows="3" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white">${esc(q?.rubric || '')}</textarea>
+              </div>
             </div>
 
             <div class="flex justify-end gap-3 pt-4 border-t border-slate-800">
               <button type="button" id="close-q-modal-btn-2" class="px-4 py-2 rounded-xl bg-slate-800 text-slate-300 font-bold">Cancel</button>
-              <button type="submit" class="px-6 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold shadow-md">
-                ${isEdit ? 'SAVE CHANGES' : 'CREATE QUESTION'}
-              </button>
+              <button type="submit" class="px-6 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold">${isEdit ? 'SAVE' : 'CREATE'}</button>
             </div>
           </form>
         </div>
-      </div>
-    `;
+      </div>`;
 
-    const closeModal = () => { host.innerHTML = ''; };
-    host.querySelector('#close-q-modal-btn')?.addEventListener('click', closeModal);
-    host.querySelector('#close-q-modal-btn-2')?.addEventListener('click', closeModal);
+    const close = () => { host.innerHTML = ''; };
+    host.querySelector('#close-q-modal-btn')?.addEventListener('click', close);
+    host.querySelector('#close-q-modal-btn-2')?.addEventListener('click', close);
 
-    const typeSelect = host.querySelector('#q-type') as HTMLSelectElement;
-    const mcqContainer = host.querySelector('#mcq-options-container') as HTMLElement;
-    const codingContainer = host.querySelector('#coding-testcases-container') as HTMLElement;
-
-    const secSelect = host.querySelector('#q-section-select') as HTMLSelectElement;
-    const newSecBox = host.querySelector('#new-section-name-box') as HTMLElement;
-
-    secSelect?.addEventListener('change', () => {
-      if (newSecBox) {
-        newSecBox.classList.toggle('hidden', secSelect.value !== '__NEW_SECTION__');
-      }
-    });
-
-    typeSelect?.addEventListener('change', () => {
-      const val = typeSelect.value;
-      if (mcqContainer) mcqContainer.style.display = val === 'mcq' ? 'block' : 'none';
-      if (codingContainer) codingContainer.style.display = (val === 'coding' || val === 'sql') ? 'block' : 'none';
-    });
-
-    host.querySelector('#q-form')?.addEventListener('submit', (e) => {
-      e.preventDefault();
-      const title = (host.querySelector('#q-title') as HTMLInputElement).value;
-      const content = (host.querySelector('#q-content') as HTMLTextAreaElement).value;
-      const type = (host.querySelector('#q-type') as HTMLSelectElement).value as any;
-      const difficulty = (host.querySelector('#q-diff') as HTMLSelectElement).value as any;
-      const category = (host.querySelector('#q-cat') as HTMLInputElement).value;
-      const points = parseInt((host.querySelector('#q-points') as HTMLInputElement).value, 10) || 15;
-      const tags = (host.querySelector('#q-tags') as HTMLInputElement).value.split(',').map(t => t.trim()).filter(Boolean);
-
-      const opt0 = (host.querySelector('#q-opt-0') as HTMLInputElement)?.value || 'Option A';
-      const opt1 = (host.querySelector('#q-opt-1') as HTMLInputElement)?.value || 'Option B';
-      const opt2 = (host.querySelector('#q-opt-2') as HTMLInputElement)?.value || 'Option C';
-      const opt3 = (host.querySelector('#q-opt-3') as HTMLInputElement)?.value || 'Option D';
-      const correctOptId = (host.querySelector('#q-correct-opt') as HTMLSelectElement)?.value || 'opt-1';
-
-      const configuredOptions = [
-        { id: 'opt-1', text: opt0 },
-        { id: 'opt-2', text: opt1 },
-        { id: 'opt-3', text: opt2 },
-        { id: 'opt-4', text: opt3 }
-      ];
-
-      // Build Test Cases array for coding / sql questions
-      const configuredTestCases = [0, 1, 2, 3, 4].map(idx => {
-        const inputVal = (host.querySelector(`#tc-input-${idx}`) as HTMLInputElement)?.value || 'sample';
-        const outputVal = (host.querySelector(`#tc-output-${idx}`) as HTMLInputElement)?.value || 'sample';
-        const weightVal = parseInt((host.querySelector(`#tc-weight-${idx}`) as HTMLInputElement)?.value, 10) || 10;
-        return {
-          id: `tc-${idx + 1}`,
-          input: inputVal,
-          expectedOutput: outputVal,
-          isHidden: idx >= 3,
-          weight: weightVal
-        };
+    const syncPanels = () => {
+      const t = (host.querySelector('#q-type') as HTMLSelectElement).value;
+      const showOpts = t === 'mcq' || t === 'msq' || t === 'drag_drop';
+      host.querySelector('#panel-mcq')?.classList.toggle('hidden', !showOpts);
+      host.querySelector('#panel-coding')?.classList.toggle('hidden', !(t === 'coding' || t === 'sql'));
+      host.querySelector('#panel-essay')?.classList.toggle('hidden', t !== 'essay');
+      host.querySelector('#drag-hint')?.classList.toggle('hidden', t !== 'drag_drop');
+      const label = host.querySelector('#opts-label');
+      if (label) label.textContent = t === 'drag_drop' ? 'Items (correct order top → bottom)' : 'Options';
+      host.querySelectorAll('.opt-correct').forEach(el => {
+        (el as HTMLElement).style.display = t === 'drag_drop' ? 'none' : '';
       });
+    };
+    host.querySelector('#q-type')?.addEventListener('change', syncPanels);
+    syncPanels();
+    const jobSel = host.querySelector('#q-job') as HTMLSelectElement | null;
+    jobSel?.addEventListener('change', () => { void this.fillSections(host, q); });
+    void this.fillSections(host, q);
 
-      let chosenSection = secSelect?.value || 'Technical MCQs & Aptitude';
-      if (chosenSection === '__NEW_SECTION__') {
-        const newSecName = (host.querySelector('#q-new-section-input') as HTMLInputElement)?.value.trim();
-        chosenSection = newSecName || 'Custom Assessment Section';
-      }
+    host.querySelector('#add-opt')?.addEventListener('click', () => {
+      const list = host.querySelector('#opts-list');
+      if (!list) return;
+      const id = `opt-${Date.now()}`;
+      list.insertAdjacentHTML('beforeend', optionRow(id, '', false, list.children.length));
+    });
+    host.querySelector('#add-tc')?.addEventListener('click', () => {
+      const list = host.querySelector('#tc-list');
+      if (!list) return;
+      list.insertAdjacentHTML('beforeend', tcRow({
+        id: `tc-${Date.now()}`, input: '', expectedOutput: '', isHidden: true, weight: 1,
+      }, list.children.length));
+    });
 
-      let savedQuestion: Question;
-
-      if (isEdit && q) {
-        savedQuestion = {
-          ...q,
-          title,
-          content,
-          type,
-          difficulty,
-          category,
-          points,
-          tags,
-          options: type === 'mcq' ? configuredOptions : q.options,
-          correctAnswers: type === 'mcq' ? [correctOptId] : q.correctAnswers,
-          testCases: (type === 'coding' || type === 'sql') ? configuredTestCases : q.testCases
-        };
-        store.updateQuestion(q.id, savedQuestion);
-      } else {
-        savedQuestion = {
-          id: `q-${Date.now()}`,
-          title,
-          content,
-          type,
-          difficulty,
-          category,
-          points,
-          tags,
-          options: type === 'mcq' ? configuredOptions : undefined,
-          correctAnswers: type === 'mcq' ? [correctOptId] : undefined,
-          testCases: (type === 'coding' || type === 'sql') ? configuredTestCases : undefined
-        };
-        store.addQuestion(savedQuestion, chosenSection);
-      }
-
-      store.assignQuestionToSection(chosenSection, savedQuestion);
-
-      closeModal();
-      this.render();
+    host.querySelector('#q-form')?.addEventListener('submit', e => {
+      e.preventDefault();
+      void this.saveQuestion(q, host, close);
     });
   }
+
+  private async fillSections(host: HTMLElement, q?: Question) {
+    const sel = host.querySelector('#q-section') as HTMLSelectElement | null;
+    const jobId = (host.querySelector('#q-job') as HTMLSelectElement | null)?.value || '';
+    if (!sel) return;
+    if (!jobId) {
+      sel.innerHTML = `<option value="">Choose a job first</option>`;
+      return;
+    }
+    const job = this.jobs.find(j => j.id === jobId);
+    if (!job) return;
+    try {
+      const exam = await recruiterApi.assessment(job.assessmentId);
+      const current = exam.sections.find(s => (s.questions || []).some(item => item.id === q?.id));
+      sel.innerHTML = `<option value="">No section yet</option>${exam.sections.map(s =>
+        `<option value="${esc(s.id)}" ${current?.id === s.id ? 'selected' : ''}>${esc(s.name)}</option>`,
+      ).join('')}`;
+    } catch {
+      sel.innerHTML = `<option value="">Could not load sections</option>`;
+    }
+  }
+
+  private async saveQuestion(q: Question | undefined, host: HTMLElement, close: () => void) {
+    const type = (host.querySelector('#q-type') as HTMLSelectElement).value as Question['type'];
+    const sectionCategory = (host.querySelector('#q-cat') as HTMLSelectElement).value;
+    const chosenJob = (host.querySelector('#q-job') as HTMLSelectElement | null)?.value || this.jobId || '';
+    const chosenSection = (host.querySelector('#q-section') as HTMLSelectElement | null)?.value || '';
+    const body: Record<string, unknown> = {
+      type,
+      title: (host.querySelector('#q-title') as HTMLInputElement).value.trim(),
+      content: (host.querySelector('#q-content') as HTMLTextAreaElement).value.trim(),
+      difficulty: (host.querySelector('#q-diff') as HTMLSelectElement).value,
+      points: parseInt((host.querySelector('#q-points') as HTMLInputElement).value, 10) || 10,
+      sectionCategory,
+      category: CATEGORIES.find(c => c.type === type)?.label || 'MCQ',
+      jobId: chosenJob,
+      sectionId: chosenSection,
+      jobRole: this.jobs.find(j => j.id === chosenJob)?.title || null,
+      stemFormat: (host.querySelector('#q-stem') as HTMLSelectElement).value,
+      tags: q?.tags || [],
+      status: 'published',
+    };
+
+    if (type === 'mcq' || type === 'msq' || type === 'drag_drop') {
+      body.selectionMode = type === 'msq' ? 'multi' : 'single';
+      const options: { id: string; text: string }[] = [];
+      const correct: string[] = [];
+      host.querySelectorAll('[data-opt-row]').forEach(row => {
+        const id = (row as HTMLElement).getAttribute('data-opt-row') || '';
+        const text = (row.querySelector('.opt-text') as HTMLInputElement).value.trim();
+        const checked = (row.querySelector('.opt-correct') as HTMLInputElement)?.checked;
+        if (id && text) {
+          options.push({ id, text });
+          if (type === 'drag_drop') correct.push(id);
+          else if (checked) correct.push(id);
+        }
+      });
+      body.options = options;
+      body.correctAnswers = correct;
+    }
+
+    if (type === 'coding' || type === 'sql') {
+      body.constraints = (host.querySelector('#q-constraints') as HTMLTextAreaElement)?.value || '';
+      body.ioFormat = (host.querySelector('#q-io') as HTMLTextAreaElement)?.value || '';
+      const testCases: unknown[] = [];
+      host.querySelectorAll('[data-tc-row]').forEach(row => {
+        const id = (row as HTMLElement).getAttribute('data-tc-row') || '';
+        testCases.push({
+          id,
+          input: (row.querySelector('.tc-in') as HTMLInputElement).value,
+          expectedOutput: (row.querySelector('.tc-out') as HTMLInputElement).value,
+          isHidden: (row.querySelector('.tc-hidden') as HTMLInputElement).checked,
+          weight: parseInt((row.querySelector('.tc-weight') as HTMLInputElement).value, 10) || 1,
+        });
+      });
+      body.testCases = testCases;
+    }
+
+    if (type === 'essay') {
+      body.essayMinWords = parseInt((host.querySelector('#q-minw') as HTMLInputElement).value, 10) || 50;
+      body.essayMaxWords = parseInt((host.querySelector('#q-maxw') as HTMLInputElement).value, 10) || 500;
+      body.rubric = (host.querySelector('#q-rubric') as HTMLTextAreaElement).value;
+    }
+
+    try {
+      if (q) await recruiterApi.updateQuestion(q.id, body as Partial<Question>);
+      else await recruiterApi.createQuestion(body as Partial<Question> & { type: string; title: string });
+      close();
+      await this.load();
+    } catch (e) {
+      alert(e instanceof ApiError ? e.message : 'Save failed.');
+    }
+  }
+
+  private renderBulkUploadModal() {
+    const host = this.container.querySelector('#admin-modal-host') as HTMLElement;
+    if (!host) return;
+    let result: BulkQuestionImportResult | null = null;
+    let busy = false;
+    let error = '';
+
+    const paint = () => {
+      host.innerHTML = `
+        <div class="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4">
+          <div class="glass-panel w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-3xl border border-slate-800 p-6 space-y-5">
+            <div class="flex items-center justify-between border-b border-slate-800 pb-4">
+              <div>
+                <h3 class="text-lg font-extrabold text-white">Bulk upload questions</h3>
+                <p class="text-xs text-slate-400 mt-0.5">Upload .xlsx / .xls / .csv — rows are parsed and stored in the question bank</p>
+              </div>
+              <button id="bulk-q-close" class="text-slate-400 hover:text-white font-bold">✕</button>
+            </div>
+
+            ${!result ? `
+              <div>
+                <label class="block font-semibold text-slate-300 mb-1 text-xs">Assign imported questions to a job</label>
+                <select id="bulk-q-role" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white text-xs">
+                  <option value="">— Not assigned —</option>
+                  ${this.jobs.filter(j => j.status !== 'closed').map(j => `<option value="${esc(j.id)}">${esc(j.title)}</option>`).join('')}
+                </select>
+                <p class="text-[11px] text-slate-500 mt-1">Closed jobs are not listed. A Job column in the file overrides this for that row.</p>
+              </div>
+              <label id="bulk-q-drop" class="flex flex-col items-center justify-center gap-3 p-10 rounded-2xl border-2 border-dashed border-slate-700 bg-slate-950/60 cursor-pointer hover:border-blue-500/50 transition-colors">
+                <span class="text-3xl">📤</span>
+                <span class="text-sm font-bold text-white">Drop spreadsheet here or click to browse</span>
+                <span class="text-[11px] text-slate-500">Columns: Question, Section, Category, Content, Difficulty, Points, Options, CorrectAnswer, Job</span>
+                <input id="bulk-q-file" type="file" accept=".csv,.xlsx,.xls" class="hidden" ${busy ? 'disabled' : ''} />
+              </label>
+              ${busy ? `<p class="text-xs text-blue-300 font-mono">Importing…</p>` : ''}
+            ` : `
+              <div class="flex flex-wrap gap-2 text-[11px] font-bold">
+                <span class="px-2.5 py-1 rounded-lg bg-emerald-500/15 text-emerald-300 border border-emerald-500/20">Created ${result.created}</span>
+                <span class="px-2.5 py-1 rounded-lg bg-red-500/15 text-red-300 border border-red-500/20">Failed ${result.failed}</span>
+                <span class="px-2.5 py-1 rounded-lg bg-slate-800 text-slate-300 border border-slate-700">Total ${result.totalRows}</span>
+              </div>
+              ${result.errors.length ? `
+                <div class="max-h-40 overflow-y-auto rounded-xl border border-slate-800 text-[11px]">
+                  ${result.errors.map(e => `
+                    <div class="px-3 py-2 border-b border-slate-800/80">
+                      <span class="text-slate-500 font-mono">Row ${e.rowNumber}</span>
+                      <span class="text-white ml-2">${esc(e.title || '(untitled)')}</span>
+                      <p class="text-red-400 mt-0.5">${esc((e.errors || []).join('; '))}</p>
+                    </div>`).join('')}
+                </div>
+              ` : `<p class="text-xs text-emerald-300">All rows imported successfully.</p>`}
+            `}
+
+            ${error ? `<p class="text-xs text-red-400 font-semibold">${esc(error)}</p>` : ''}
+
+            <div class="flex items-center justify-between gap-3 pt-2 border-t border-slate-800">
+              <button type="button" id="bulk-q-sample" class="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-blue-400 font-bold text-xs border border-slate-700">Download sample template</button>
+              <button type="button" id="bulk-q-close-2" class="px-4 py-2 rounded-xl bg-slate-800 text-slate-300 font-bold text-xs">Close</button>
+            </div>
+          </div>
+        </div>`;
+
+      const close = () => {
+        host.innerHTML = '';
+        if (result && result.created > 0) void this.load();
+      };
+      host.querySelector('#bulk-q-close')?.addEventListener('click', close);
+      host.querySelector('#bulk-q-close-2')?.addEventListener('click', close);
+      host.querySelector('#bulk-q-sample')?.addEventListener('click', () => recruiterApi.downloadQuestionSample());
+
+      const fileInput = host.querySelector('#bulk-q-file') as HTMLInputElement | null;
+      const drop = host.querySelector('#bulk-q-drop');
+      const jobSelect = host.querySelector('#bulk-q-role') as HTMLSelectElement | null;
+      let chosenJobId = jobSelect?.value || '';
+      jobSelect?.addEventListener('change', () => { chosenJobId = jobSelect.value; });
+      const runUpload = async (file: File) => {
+        const jobId = chosenJobId || jobSelect?.value || '';
+        if (!jobId) {
+          error = 'Select a job before uploading. Questions are assigned to that job.';
+          paint();
+          return;
+        }
+        busy = true;
+        error = '';
+        paint();
+        try {
+          result = await recruiterApi.bulkImportQuestions(file, jobId);
+        } catch (e) {
+          error = e instanceof ApiError ? e.message : 'Upload failed.';
+        } finally {
+          busy = false;
+          paint();
+        }
+      };
+      fileInput?.addEventListener('change', () => {
+        const f = fileInput.files?.[0];
+        if (f) void runUpload(f);
+      });
+      drop?.addEventListener('dragover', e => { e.preventDefault(); });
+      drop?.addEventListener('drop', e => {
+        e.preventDefault();
+        const f = (e as DragEvent).dataTransfer?.files?.[0];
+        if (f) void runUpload(f);
+      });
+    };
+
+    paint();
+  }
 }
+
+const esc = (v: unknown) =>
+  String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string));
+
+const typeTone = (type: string) =>
+  type === 'coding' ? 'bg-blue-500/20 text-blue-300'
+    : type === 'sql' ? 'bg-purple-500/20 text-purple-300'
+      : type === 'essay' ? 'bg-amber-500/20 text-amber-300'
+        : type === 'msq' ? 'bg-cyan-500/20 text-cyan-300'
+          : 'bg-emerald-500/20 text-emerald-300';
+
+const optionRow = (id: string, text: string, correct: boolean, _i: number, dragMode = false) => `
+  <div data-opt-row="${esc(id)}" class="flex items-center gap-2">
+    <input type="checkbox" class="opt-correct" ${correct ? 'checked' : ''} title="Correct" ${dragMode ? 'style="display:none"' : ''} />
+    <span class="text-slate-600 font-mono text-[10px] w-4">${_i + 1}</span>
+    <input class="opt-text glass-input flex-1 px-3 py-2 rounded-lg border border-slate-700 bg-slate-950 text-white" value="${esc(text)}" placeholder="${dragMode ? 'Item text' : 'Option text'}" />
+    <button type="button" class="text-slate-500 hover:text-red-400 font-bold px-1" onclick="this.closest('[data-opt-row]')?.remove()" title="Remove">×</button>
+  </div>`;
+
+const tcRow = (c: { id: string; input: string; expectedOutput: string; isHidden: boolean; weight: number }, _i: number) => `
+  <div data-tc-row="${esc(c.id)}" class="grid grid-cols-12 gap-2 items-center p-2 rounded-lg bg-slate-950 border border-slate-800">
+    <input class="tc-in col-span-4 glass-input px-2 py-1.5 rounded-lg border border-slate-700 bg-slate-900 text-white" value="${esc(c.input)}" placeholder="Input" />
+    <input class="tc-out col-span-4 glass-input px-2 py-1.5 rounded-lg border border-slate-700 bg-slate-900 text-white" value="${esc(c.expectedOutput)}" placeholder="Expected" />
+    <label class="col-span-2 flex items-center gap-1 text-slate-400"><input type="checkbox" class="tc-hidden" ${c.isHidden ? 'checked' : ''} /> Hidden</label>
+    <input type="number" class="tc-weight col-span-2 glass-input px-2 py-1.5 rounded-lg border border-slate-700 bg-slate-900 text-white" value="${c.weight}" title="Weight" />
+  </div>`;

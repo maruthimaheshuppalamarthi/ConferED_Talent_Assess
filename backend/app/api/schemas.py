@@ -95,6 +95,8 @@ class InviteOut(BaseModel):
     link: str
     expiresAt: str
     otpDestination: str
+    assessmentTitle: Optional[str] = None
+    durationMinutes: Optional[int] = None
     devOtp: Optional[str] = None
 
 
