@@ -1,4 +1,5 @@
 import { CsvExporterService } from '../services/csvExporter';
+import { ApiError, authApi } from '../services/authApi';
 import { EmailService } from '../services/emailService';
 import { store } from '../services/store';
 import { Candidate } from '../types';
@@ -314,11 +315,8 @@ export class RecruiterPortalModule {
     this.container.querySelectorAll('.copy-cand-link-btn').forEach(btn => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
-        const state = store.getState();
-        const link = `${window.location.origin}/?assessment=${state.activeAssessmentId}`;
-        navigator.clipboard.writeText(link).then(() => {
-          alert('Candidate assessment link copied to clipboard!');
-        });
+        const cid = (e.currentTarget as HTMLElement).getAttribute('data-copy-link');
+        if (cid) void this.reissueInviteLink(cid);
       });
     });
 
@@ -654,8 +652,7 @@ export class RecruiterPortalModule {
     });
 
     host.querySelector('#modal-copy-link-btn')?.addEventListener('click', () => {
-      const link = `${window.location.origin}/?assessment=${state.activeAssessmentId}`;
-      navigator.clipboard.writeText(link).then(() => alert('Candidate assessment link copied!'));
+      void this.reissueInviteLink(candidateId);
     });
 
     const notesInput = host.querySelector('#recruiter-notes') as HTMLTextAreaElement;
@@ -687,8 +684,8 @@ export class RecruiterPortalModule {
     if (!host) return;
 
     const state = store.getState();
-    const token = `nexus_token_${Date.now()}`;
-    const generatedLink = `${window.location.origin}/?assessment=${state.activeAssessmentId}&token=${token}`;
+    // The personal invite link (with its secret token) is created by the server when the invitation is dispatched.
+    let generatedLink = '';
 
     host.innerHTML = `
       <div class="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4">
@@ -735,7 +732,7 @@ export class RecruiterPortalModule {
                   <span>📋</span> Copy Link
                 </button>
               </div>
-              <input id="gen-link-input" type="text" readonly value="${generatedLink}" class="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-blue-300 font-mono text-xs focus:ring-1 focus:ring-blue-500" />
+              <input id="gen-link-input" type="text" readonly value="" placeholder="Generated securely when you dispatch the invitation" class="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-blue-300 font-mono text-xs focus:ring-1 focus:ring-blue-500" />
             </div>
 
             <!-- Dispatch Success Output Box -->
@@ -755,7 +752,7 @@ export class RecruiterPortalModule {
             </div>
 
             <button id="send-inv-btn" class="w-full py-3.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold text-xs tracking-wider shadow-lg shadow-blue-600/30 transition-all flex items-center justify-center gap-2">
-              <span>✉️</span> DISPATCH EMAIL & SMS INVITATION
+              <span>✉️</span> DISPATCH EMAIL INVITATION
             </button>
           </div>
         </div>
@@ -771,7 +768,7 @@ export class RecruiterPortalModule {
     const genInput = host.querySelector('#gen-link-input') as HTMLInputElement;
 
     copyBtn?.addEventListener('click', () => {
-      if (genInput) {
+      if (genInput && genInput.value) {
         genInput.select();
         navigator.clipboard.writeText(genInput.value).then(() => {
           copyBtn.innerHTML = '<span>✓</span> Copied!';
@@ -790,53 +787,94 @@ export class RecruiterPortalModule {
     const launchBtn = host.querySelector('#launch-cand-link-btn');
 
     sendBtn?.addEventListener('click', async () => {
-      const name = (host.querySelector('#inv-name') as HTMLInputElement).value || 'Candidate';
-      const email = (host.querySelector('#inv-email') as HTMLInputElement).value || 'candidate@example.com';
-      const phone = (host.querySelector('#inv-phone') as HTMLInputElement).value || '+1-555-0100';
+      const name = (host.querySelector('#inv-name') as HTMLInputElement).value.trim() || 'Candidate';
+      const email = (host.querySelector('#inv-email') as HTMLInputElement).value.trim();
+      const phone = (host.querySelector('#inv-phone') as HTMLInputElement).value.trim();
+      const expHours = parseInt((host.querySelector('#inv-exp') as HTMLSelectElement).value, 10) || 48;
+      const esc = (s: string) => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string));
 
-      const newCand: Candidate = {
-        id: `cand-${Date.now()}`,
-        name,
-        email,
-        phone,
-        experienceYears: 4,
-        skills: ['Python', 'SQL'],
-        status: 'Assessment Sent',
-        assessmentId: state.activeAssessmentId,
-        invitedAt: new Date().toISOString().split('T')[0],
-        otpVerified: false,
-        systemCheckPassed: false,
-        assessmentCompleted: false
-      };
-
-      store.addCandidate(newCand);
-
-      // Generate Unique 6-Digit Candidate Security OTP Passcode
-      const uniqueCandOtp = EmailService.generateUniqueOtp();
-      store.setActiveCandidateOtp(uniqueCandOtp);
-
-      // Trigger Real Email Dispatch via Gmail SMTP
-      EmailService.sendCandidateInviteEmail(name, email, generatedLink, uniqueCandOtp);
-
-      if (dispatchBox && dispatchMsgText) {
-        dispatchMsgText.innerHTML = `Real Email with secure link and unique OTP passcode (<strong>${uniqueCandOtp}</strong>) has been dispatched to <strong class="text-white">${email}</strong>. SMS OTP notification dispatched to <strong class="text-white">${phone}</strong>.`;
-        dispatchBox.classList.remove('hidden');
+      if (!email) {
+        alert('Please enter the candidate email address.');
+        return;
       }
 
       sendBtn.disabled = true;
-      sendBtn.textContent = '✓ Real Email Dispatched to ' + email;
-      sendBtn.className = 'w-full py-3.5 rounded-xl bg-emerald-600 text-white font-bold text-xs tracking-wider opacity-90 cursor-not-allowed';
+      try {
+        // The server creates the personal invite link + OTP and emails both to the candidate (RBAC: Recruiter+).
+        const invite = await authApi.createInvite({
+          name,
+          email,
+          phone,
+          assessmentId: state.activeAssessmentId,
+          expiresInHours: expHours
+        });
+        generatedLink = invite.link;
+        if (genInput) genInput.value = generatedLink;
+        EmailService.recordInvite(name, email, generatedLink, invite.devOtp);
 
-      // Render Prominent Success Popup Modal Dialog
-      this.renderEmailDispatchedSuccessPopup(name, email, generatedLink, uniqueCandOtp);
+        store.addCandidate({
+          id: invite.candidateId,
+          name,
+          email,
+          phone,
+          experienceYears: 4,
+          skills: ['Python', 'SQL'],
+          status: 'Assessment Sent',
+          assessmentId: state.activeAssessmentId,
+          invitedAt: new Date().toISOString().split('T')[0],
+          otpVerified: false,
+          systemCheckPassed: false,
+          assessmentCompleted: false
+        } as Candidate);
+
+        if (dispatchBox && dispatchMsgText) {
+          dispatchMsgText.innerHTML = `Invitation with a secure personal link and a one-time passcode has been emailed to <strong class="text-white">${esc(invite.otpDestination)}</strong>.${invite.devOtp ? ` <span class="text-amber-300">(DEV OTP: <strong>${esc(invite.devOtp)}</strong>)</span>` : ''}`;
+          dispatchBox.classList.remove('hidden');
+        }
+
+        sendBtn.textContent = '✓ Invitation dispatched to ' + email;
+        sendBtn.className = 'w-full py-3.5 rounded-xl bg-emerald-600 text-white font-bold text-xs tracking-wider opacity-90 cursor-not-allowed';
+
+        this.renderEmailDispatchedSuccessPopup(name, email, generatedLink, invite.devOtp || null);
+      } catch (e) {
+        sendBtn.disabled = false;
+        alert(e instanceof ApiError ? e.message : 'Could not create the invitation.');
+      }
     });
 
     launchBtn?.addEventListener('click', () => {
-      window.open(generatedLink, '_blank');
+      if (generatedLink) window.open(generatedLink, '_blank');
     });
   }
 
-  private renderEmailDispatchedSuccessPopup(candidateName: string, candidateEmail: string, assessmentLink: string, otpCode: string) {
+  /**
+   * Candidate links are personal (server-issued secret token), so "copy link" issues a fresh
+   * invitation for that candidate: new link + new OTP emailed to them, and the link is copied here.
+   */
+  private async reissueInviteLink(candidateId: string) {
+    const state = store.getState();
+    const cand = state.candidates.find(c => c.id === candidateId);
+    if (!cand) return;
+    if (!confirm(`Issue a new personal link and passcode for ${cand.name}? A fresh invitation email will be sent to ${cand.email}.`)) {
+      return;
+    }
+    try {
+      const invite = await authApi.createInvite({
+        name: cand.name,
+        email: cand.email,
+        phone: cand.phone,
+        assessmentId: cand.assessmentId || state.activeAssessmentId,
+        expiresInHours: 48,
+        candidateId: cand.id
+      });
+      await navigator.clipboard.writeText(invite.link).catch(() => {});
+      alert(`New invitation sent to ${invite.otpDestination} and link copied to clipboard.${invite.devOtp ? `\n\nDEV OTP: ${invite.devOtp}` : ''}`);
+    } catch (e) {
+      alert(e instanceof ApiError ? e.message : 'Could not issue a new invitation.');
+    }
+  }
+
+  private renderEmailDispatchedSuccessPopup(candidateName: string, candidateEmail: string, assessmentLink: string, otpCode: string | null) {
     const popupHost = document.createElement('div');
     popupHost.id = 'email-sent-success-popup';
     popupHost.innerHTML = `
@@ -849,7 +887,7 @@ export class RecruiterPortalModule {
           <div class="space-y-2">
             <h3 class="text-xl font-extrabold text-white">Assessment Invitation Dispatched!</h3>
             <p class="text-xs text-slate-300 leading-relaxed">
-              Assessment link and 2FA access OTP passcode (<strong class="text-emerald-400 font-mono text-sm">${otpCode}</strong>) have been successfully sent to candidate <strong class="text-white">${candidateName}</strong>.
+              Assessment link and a one-time access passcode have been emailed to candidate <strong class="text-white">${candidateName}</strong>.
             </p>
           </div>
 
@@ -860,11 +898,11 @@ export class RecruiterPortalModule {
             </div>
             <div class="flex items-center justify-between">
               <span class="text-slate-400">Access OTP Code:</span>
-              <strong class="text-emerald-400">${otpCode}</strong>
+              <strong class="text-emerald-400">${otpCode ? otpCode + ' (dev mode)' : 'Sent to candidate only'}</strong>
             </div>
             <div class="flex items-center justify-between">
               <span class="text-slate-400">Delivery Gateway:</span>
-              <span class="text-emerald-400 font-sans text-[11px] font-bold">✓ Live Gmail SMTP (smtp.gmail.com:587) Inbox Delivery</span>
+              <span class="text-emerald-400 font-sans text-[11px] font-bold">Server-side Gmail SMTP (smtp.gmail.com:587)</span>
             </div>
           </div>
 

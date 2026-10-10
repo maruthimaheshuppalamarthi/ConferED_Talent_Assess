@@ -1,15 +1,23 @@
-import { EmailService } from '../services/emailService';
+import { authApi, ApiError } from '../services/authApi';
 import { store } from '../services/store';
 import { UserRole } from '../types';
 
 export class NavbarComponent {
   private container: HTMLElement;
   private authStep: 'credentials' | 'otp' | 'register' | 'forgot_password' | 'reset_password_otp' = 'credentials';
+  // DEV: sign-in form is pre-filled with the seeded dev admin. Remove these defaults before production.
   private pendingEmail: string = 'admin@7666';
   private pendingPassword: string = '970598';
   private pendingRole: UserRole = 'Admin';
   private regName: string = '';
   private resetEmailTarget: string = '';
+  // Server-side OTP challenge state
+  private challengeId: string = '';
+  private otpDestination: string = '';
+  private devOtp: string = '';
+  // Inline feedback
+  private errorMsg: string = '';
+  private infoMsg: string = '';
 
   constructor(container: HTMLElement) {
     this.container = container;
@@ -23,11 +31,13 @@ export class NavbarComponent {
     const urlParams = new URLSearchParams(window.location.search);
     const isExplicitCandidateLink = urlParams.has('assessment');
 
-    const roles: { role: UserRole; label: string; icon: string }[] = [
+    // Only workspaces the server granted to this account are offered (RBAC).
+    const allRoles: { role: UserRole; label: string; icon: string }[] = [
       { role: 'Recruiter', label: 'Recruiter Workspace', icon: '💼' },
       { role: 'Admin', label: 'Admin & System Control', icon: '🛡️' },
       { role: 'Super Admin', label: 'Live Proctor Monitor', icon: '📹' },
     ];
+    const roles = allRoles.filter(r => state.allowedRoles.includes(r.role));
 
     this.container.innerHTML = `
       <header class="glass-panel border-b border-slate-800/80 sticky top-0 z-50 px-4 lg:px-8 py-3 transition-all">
@@ -117,7 +127,7 @@ export class NavbarComponent {
     });
 
     this.container.querySelector('#logout-btn')?.addEventListener('click', () => {
-      store.logoutAdminRecruiter();
+      void store.logoutAdminRecruiter();
     });
 
     this.container.querySelector('#theme-toggle-btn')?.addEventListener('click', () => {
@@ -125,16 +135,46 @@ export class NavbarComponent {
     });
 
     this.container.querySelector('#open-auth-btn')?.addEventListener('click', () => {
-      this.authStep = 'credentials';
-      this.renderAuthModal();
+      this.openStep('credentials');
     });
 
     this.container.querySelector('#brand-logo-btn')?.addEventListener('click', () => {
       if (!store.getState().isAuthenticatedAdminRecruiter) {
-        this.authStep = 'credentials';
-        this.renderAuthModal();
+        this.openStep('credentials');
       }
     });
+  }
+
+  private openStep(step: NavbarComponent['authStep'], opts: { keepMessages?: boolean } = {}) {
+    this.authStep = step;
+    if (!opts.keepMessages) {
+      this.errorMsg = '';
+      this.infoMsg = '';
+    }
+    this.renderAuthModal();
+  }
+
+  private escapeHtml(value: string): string {
+    return value.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string));
+  }
+
+  private errorText(e: unknown): string {
+    return e instanceof ApiError ? e.message : 'Something went wrong. Please try again.';
+  }
+
+  /** Run an async auth action with the button disabled and errors shown inline. */
+  private async guarded(btn: Element | null, action: () => Promise<void>) {
+    const button = btn as HTMLButtonElement | null;
+    if (button) button.disabled = true;
+    this.errorMsg = '';
+    try {
+      await action();
+    } catch (e) {
+      this.errorMsg = this.errorText(e);
+      this.renderAuthModal();
+    } finally {
+      if (button && button.isConnected) button.disabled = false;
+    }
   }
 
   private renderAuthModal() {
@@ -165,6 +205,9 @@ export class NavbarComponent {
             </button>
           </div>
 
+          <p id="auth-error" class="text-xs font-semibold text-red-400 ${this.errorMsg ? '' : 'hidden'}">${this.escapeHtml(this.errorMsg)}</p>
+          <p id="auth-info" class="text-xs font-semibold text-emerald-400 ${this.infoMsg ? '' : 'hidden'}">${this.escapeHtml(this.infoMsg)}</p>
+
           ${(this.authStep === 'credentials' || this.authStep === 'otp') ? `
             ${this.authStep === 'credentials' ? `
               <!-- Step 1: Admin Credentials Form -->
@@ -188,8 +231,6 @@ export class NavbarComponent {
                   <input id="login-password" type="password" value="${this.pendingPassword}" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white font-mono" placeholder="970598" />
                 </div>
 
-                <p id="cred-error" class="text-xs font-semibold text-red-400 hidden">Invalid email or password! Check credentials or click Register / Reset Password.</p>
-
                 <button id="submit-creds-btn" class="w-full py-3.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold text-xs tracking-wider shadow-lg shadow-blue-600/30 transition-all flex items-center justify-center gap-2">
                   <span>SEND 2FA EMAIL OTP</span> <span>➔</span>
                 </button>
@@ -199,25 +240,25 @@ export class NavbarComponent {
               <div class="space-y-4 text-xs">
                 <div class="p-3.5 rounded-xl bg-blue-500/10 border border-blue-500/30 text-blue-300">
                   <span class="font-bold">✉️ 2FA OTP Sent to Your Email Inbox!</span>
-                  <p class="text-[11px] text-slate-300 mt-1">A unique 6-digit verification OTP has been sent to <code class="text-emerald-400 font-bold font-mono">udayrise7666@gmail.com</code>. Please check your inbox and enter the passcode below.</p>
+                  <p class="text-[11px] text-slate-300 mt-1">A unique 6-digit verification OTP has been sent to <code class="text-emerald-400 font-bold font-mono">${this.escapeHtml(this.otpDestination)}</code>. It expires in 10 minutes. Check your inbox and enter the passcode below.</p>
                 </div>
+                ${this.devOtp ? `<div class="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-[11px]">🧪 DEV MODE: OTP is <strong class="font-mono tracking-widest">${this.escapeHtml(this.devOtp)}</strong> (hidden in production)</div>` : ''}
 
                 <div>
                   <label class="block font-semibold text-slate-300 mb-1">Enter 6-Digit Email OTP Passcode</label>
                   <input id="login-otp-input" type="text" maxlength="6" value="" class="glass-input w-full px-4 py-3 rounded-xl text-center font-mono text-xl tracking-[0.5em] font-bold border border-slate-700 bg-slate-950 text-emerald-400 focus:ring-2 focus:ring-emerald-500" placeholder="------" />
                 </div>
 
-                <p id="otp-err-msg" class="text-xs font-semibold text-red-400 hidden">Please enter the 6-digit passcode sent to udayrise7666@gmail.com.</p>
-
-                <button id="verify-admin-otp-btn" class="w-full py-3.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-xs tracking-wider shadow-lg shadow-emerald-600/30 transition-all flex items-center justify-center gap-2">
+                <button id="verify-admin-otp-btn" class="w-full py-3.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-xs tracking-wider shadow-lg shadow-emerald-600/30 transition-all flex items-center justify-center gap-2 disabled:opacity-60">
                   <span>VERIFY OTP & ACCESS PORTAL</span> <span>➔</span>
                 </button>
+                <button id="resend-admin-otp-btn" type="button" class="w-full text-center text-[11px] font-semibold text-slate-400 hover:text-white">Didn't get it? Resend code</button>
               </div>
             `}
           ` : this.authStep === 'register' ? `
             <!-- Register Staff Account Form -->
             <div class="space-y-4 text-xs">
-              <p class="text-xs text-slate-300">Create a new Admin or Recruiter enterprise account.</p>
+              <p class="text-xs text-slate-300">Create a Recruiter account. Admin access is granted by an existing administrator.</p>
 
               <div>
                 <label class="block font-semibold text-slate-300 mb-1">Full Name</label>
@@ -234,16 +275,10 @@ export class NavbarComponent {
                 <input id="reg-pass" type="password" value="" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white font-mono" placeholder="••••••••" />
               </div>
 
-              <div>
-                <label class="block font-semibold text-slate-300 mb-1">Account Role</label>
-                <select id="reg-role" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white font-semibold">
-                  <option value="Recruiter">Recruiter / HR Workspace</option>
-                  <option value="Admin">System Administrator</option>
-                </select>
-              </div>
+              <p class="text-[11px] text-slate-500">Password must be at least 8 characters.</p>
 
-              <button id="submit-reg-btn" class="w-full py-3.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold text-xs tracking-wider shadow-lg shadow-blue-600/30 transition-all">
-                CREATE ACCOUNT & SIGN IN ➔
+              <button id="submit-reg-btn" class="w-full py-3.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold text-xs tracking-wider shadow-lg shadow-blue-600/30 transition-all disabled:opacity-60">
+                CREATE ACCOUNT ➔
               </button>
             </div>
           ` : `
@@ -254,7 +289,7 @@ export class NavbarComponent {
 
                 <div>
                   <label class="block font-semibold text-slate-300 mb-1">Enterprise Email Address</label>
-                  <input id="reset-email-input" type="email" value="admin@7666" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white font-mono" placeholder="admin@7666" />
+                  <input id="reset-email-input" type="email" value="${this.escapeHtml(this.resetEmailTarget || this.pendingEmail)}" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white font-mono" placeholder="you@enterprise.com" />
                 </div>
 
                 <button id="send-reset-otp-btn" class="w-full py-3.5 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-bold text-xs tracking-wider shadow-lg shadow-purple-600/30 transition-all">
@@ -265,9 +300,10 @@ export class NavbarComponent {
               <!-- Reset Password Step 2: New Password Form -->
               <div class="space-y-4 text-xs">
                 <div class="p-3 rounded-xl bg-purple-500/10 border border-purple-500/30 text-purple-300">
-                  <span>✉️ Reset OTP Dispatched to Inbox!</span>
-                  <p class="text-[11px] text-slate-300 mt-1">Check your inbox for your 6-digit reset passcode.</p>
+                  <span>✉️ If that account exists, a reset code was sent.</span>
+                  <p class="text-[11px] text-slate-300 mt-1">Check <code class="text-emerald-400 font-mono">${this.escapeHtml(this.otpDestination)}</code> for your 6-digit reset passcode.</p>
                 </div>
+                ${this.devOtp ? `<div class="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-[11px]">🧪 DEV MODE: OTP is <strong class="font-mono tracking-widest">${this.escapeHtml(this.devOtp)}</strong></div>` : ''}
 
                 <div>
                   <label class="block font-semibold text-slate-300 mb-1">Enter 6-Digit Reset OTP</label>
@@ -276,11 +312,11 @@ export class NavbarComponent {
 
                 <div>
                   <label class="block font-semibold text-slate-300 mb-1">Enter NEW Password</label>
-                  <input id="new-password-input" type="password" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white font-mono" placeholder="Create new password" />
+                  <input id="new-password-input" type="password" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white font-mono" placeholder="At least 8 characters" />
                 </div>
 
                 <button id="confirm-reset-btn" class="w-full py-3.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-xs tracking-wider shadow-lg shadow-emerald-600/30 transition-all">
-                  UPDATE PASSWORD & SIGN IN ➔
+                  UPDATE PASSWORD ➔
                 </button>
               </div>
             `}
@@ -294,20 +330,9 @@ export class NavbarComponent {
       host.innerHTML = '';
     });
 
-    host.querySelector('#tab-signin-btn')?.addEventListener('click', () => {
-      this.authStep = 'credentials';
-      this.renderAuthModal();
-    });
-
-    host.querySelector('#tab-register-btn')?.addEventListener('click', () => {
-      this.authStep = 'register';
-      this.renderAuthModal();
-    });
-
-    host.querySelector('#tab-forgot-btn')?.addEventListener('click', () => {
-      this.authStep = 'forgot_password';
-      this.renderAuthModal();
-    });
+    host.querySelector('#tab-signin-btn')?.addEventListener('click', () => this.openStep('credentials'));
+    host.querySelector('#tab-register-btn')?.addEventListener('click', () => this.openStep('register'));
+    host.querySelector('#tab-forgot-btn')?.addEventListener('click', () => this.openStep('forgot_password'));
 
     // Helper for Enter Keypress Submission
     const bindEnterKey = (inputs: (Element | null)[], targetBtn: Element | null) => {
@@ -320,6 +345,8 @@ export class NavbarComponent {
       });
     };
 
+    const val = (selector: string) => ((host.querySelector(selector) as HTMLInputElement | null)?.value || '').trim();
+
     if (this.authStep === 'credentials') {
       const emailInput = host.querySelector('#login-email');
       const passInput = host.querySelector('#login-password');
@@ -328,27 +355,26 @@ export class NavbarComponent {
       bindEnterKey([emailInput, passInput], submitBtn);
 
       submitBtn?.addEventListener('click', () => {
-        const email = (emailInput as HTMLInputElement).value.trim();
-        const password = (passInput as HTMLInputElement).value.trim();
-        const role = (host.querySelector('#login-role-select') as HTMLSelectElement).value as UserRole;
+        const email = val('#login-email');
+        const password = (passInput as HTMLInputElement).value; // do not trim passwords
+        this.pendingRole = (host.querySelector('#login-role-select') as HTMLSelectElement).value as UserRole;
+        this.pendingEmail = email;
 
-        const isValid = store.validateCredentials(email, password);
-
-        if (!isValid) {
-          const err = host.querySelector('#cred-error');
-          if (err) err.classList.remove('hidden');
+        if (!email || !password) {
+          this.errorMsg = 'Enter your email and password.';
+          this.renderAuthModal();
           return;
         }
 
-        const uniqueOtp = EmailService.generateUniqueOtp();
-        store.setActiveAdminOtp(uniqueOtp);
-        EmailService.sendAdminOtpEmail('udayrise7666@gmail.com', uniqueOtp);
-
-        this.pendingEmail = email;
-        this.pendingPassword = password;
-        this.pendingRole = role;
-        this.authStep = 'otp';
-        this.renderAuthModal();
+        void this.guarded(submitBtn, async () => {
+          // Step 1: server verifies the password and emails a one-time passcode.
+          const challenge = await authApi.login(email, password);
+          this.challengeId = challenge.challengeId;
+          this.otpDestination = challenge.otpDestination;
+          this.devOtp = challenge.devOtp || '';
+          this.pendingPassword = ''; // never keep the password around after step 1
+          this.openStep('otp');
+        });
       });
     } else if (this.authStep === 'otp') {
       const otpInput = host.querySelector('#login-otp-input');
@@ -357,19 +383,33 @@ export class NavbarComponent {
       bindEnterKey([otpInput], verifyBtn);
 
       verifyBtn?.addEventListener('click', () => {
-        const typedOtp = (otpInput as HTMLInputElement).value.trim();
-        const isValidOtp = store.verifyAdminOtp(typedOtp);
-
-        if (!isValidOtp) {
-          const err = host.querySelector('#otp-err-msg');
-          if (err) err.classList.remove('hidden');
+        const typedOtp = val('#login-otp-input');
+        if (typedOtp.length !== 6) {
+          this.errorMsg = 'Enter the 6-digit passcode.';
+          this.renderAuthModal();
           return;
         }
 
-        store.loginAdminRecruiter(this.pendingRole, this.pendingEmail, this.pendingPassword);
-        host.innerHTML = '';
-        this.authStep = 'credentials';
-        this.render();
+        void this.guarded(verifyBtn, async () => {
+          // Step 2: the server checks the OTP (expiry, attempts, single use) and issues the JWT session.
+          const session = await authApi.verifyOtp(this.challengeId, typedOtp);
+          this.challengeId = '';
+          this.devOtp = '';
+          host.innerHTML = '';
+          this.authStep = 'credentials';
+          store.loginAdminRecruiter(session.user, this.pendingRole);
+          void store.loadStaffAccounts();
+        });
+      });
+
+      host.querySelector('#resend-admin-otp-btn')?.addEventListener('click', (e) => {
+        void this.guarded(e.currentTarget as Element, async () => {
+          const challenge = await authApi.resendOtp(this.challengeId);
+          this.challengeId = challenge.challengeId;
+          this.devOtp = challenge.devOtp || '';
+          this.infoMsg = 'A new passcode has been sent.';
+          this.openStep('otp', { keepMessages: true });
+        });
       });
     } else if (this.authStep === 'register') {
       const regName = host.querySelector('#reg-name');
@@ -380,21 +420,23 @@ export class NavbarComponent {
       bindEnterKey([regName, regEmail, regPass], regBtn);
 
       regBtn?.addEventListener('click', () => {
-        const name = (regName as HTMLInputElement).value.trim() || 'Staff User';
-        const email = (regEmail as HTMLInputElement).value.trim();
-        const pass = (regPass as HTMLInputElement).value.trim();
-        const role = (host.querySelector('#reg-role') as HTMLSelectElement).value as UserRole;
+        const name = val('#reg-name') || 'Staff User';
+        const email = val('#reg-email');
+        const pass = (regPass as HTMLInputElement).value;
 
         if (!email || !pass) {
-          alert('Please enter valid email and password!');
+          this.errorMsg = 'Please enter a valid email and password.';
+          this.renderAuthModal();
           return;
         }
 
-        store.registerStaffAccount(name, email, pass, role);
-        store.loginAdminRecruiter(role, email, pass);
-        host.innerHTML = '';
-        this.authStep = 'credentials';
-        this.render();
+        void this.guarded(regBtn, async () => {
+          await authApi.register(name, email, pass);
+          this.pendingEmail = email.toLowerCase();
+          this.pendingPassword = '';
+          this.infoMsg = 'Account created. Sign in with your email and password to receive your 2FA code.';
+          this.openStep('credentials', { keepMessages: true });
+        });
       });
     } else if (this.authStep === 'forgot_password') {
       const resetEmailInput = host.querySelector('#reset-email-input');
@@ -403,17 +445,21 @@ export class NavbarComponent {
       bindEnterKey([resetEmailInput], sendResetBtn);
 
       sendResetBtn?.addEventListener('click', () => {
-        const email = (resetEmailInput as HTMLInputElement).value.trim();
+        const email = val('#reset-email-input');
         if (!email) {
-          alert('Please enter your enterprise email!');
+          this.errorMsg = 'Please enter your enterprise email.';
+          this.renderAuthModal();
           return;
         }
-        this.resetEmailTarget = email;
-        const resetOtp = EmailService.generateUniqueOtp();
-        store.setActiveAdminOtp(resetOtp);
-        EmailService.sendAdminOtpEmail('udayrise7666@gmail.com', resetOtp);
-        this.authStep = 'reset_password_otp';
-        this.renderAuthModal();
+
+        void this.guarded(sendResetBtn, async () => {
+          this.resetEmailTarget = email;
+          const challenge = await authApi.requestPasswordReset(email);
+          this.challengeId = challenge.challengeId;
+          this.otpDestination = challenge.otpDestination;
+          this.devOtp = challenge.devOtp || '';
+          this.openStep('reset_password_otp');
+        });
       });
     } else if (this.authStep === 'reset_password_otp') {
       const resetOtpInput = host.querySelector('#reset-otp-input');
@@ -423,19 +469,24 @@ export class NavbarComponent {
       bindEnterKey([resetOtpInput, newPassInput], confirmResetBtn);
 
       confirmResetBtn?.addEventListener('click', () => {
-        const otp = (resetOtpInput as HTMLInputElement).value.trim();
-        const newPass = (newPassInput as HTMLInputElement).value.trim();
+        const otp = val('#reset-otp-input');
+        const newPass = (newPassInput as HTMLInputElement).value;
 
         if (otp.length !== 6 || !newPass) {
-          alert('Please enter a 6-digit OTP and your new password!');
+          this.errorMsg = 'Please enter the 6-digit OTP and your new password.';
+          this.renderAuthModal();
           return;
         }
 
-        store.resetStaffPassword(this.resetEmailTarget || 'admin@7666', newPass);
-        store.loginAdminRecruiter('Admin', this.resetEmailTarget || 'admin@7666', newPass);
-        host.innerHTML = '';
-        this.authStep = 'credentials';
-        this.render();
+        void this.guarded(confirmResetBtn, async () => {
+          await authApi.confirmPasswordReset(this.challengeId, otp, newPass);
+          this.pendingEmail = this.resetEmailTarget;
+          this.pendingPassword = '';
+          this.challengeId = '';
+          this.devOtp = '';
+          this.infoMsg = 'Password updated. Sign in with your new password.';
+          this.openStep('credentials', { keepMessages: true });
+        });
       });
     }
   }

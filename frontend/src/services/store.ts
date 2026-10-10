@@ -1,5 +1,6 @@
 import { Assessment, Candidate, CandidateResult, Question, SystemSettings, UserRole, ProctoringViolation } from '../types';
 import { initialSettings, sampleAssessments, sampleCandidateResults, sampleCandidates, sampleQuestions } from './mockData';
+import { authApi, AuthUser, CandidateSession } from './authApi';
 
 export interface CandidateFeedback {
   rating: number; // 1 to 5
@@ -9,9 +10,9 @@ export interface CandidateFeedback {
 }
 
 export interface StaffAccount {
+  id?: string;
   name: string;
   email: string;
-  password: string;
   role: UserRole;
   registeredAt: string;
 }
@@ -19,6 +20,13 @@ export interface StaffAccount {
 export interface AppState {
   currentRole: UserRole;
   isAuthenticatedAdminRecruiter: boolean;
+  // Verified server-side identity (JWT session). Roles/workspaces come from the backend, not the UI.
+  currentUser: AuthUser | null;
+  allowedRoles: UserRole[];
+  // True once the first "restore session from refresh cookie" attempt has finished.
+  authReady: boolean;
+  // Invite token from the candidate's link (?invite=...) - exchanged for a candidate JWT after OTP.
+  candidateInviteToken: string | null;
   settings: SystemSettings;
   assessments: Assessment[];
   activeAssessmentId: string;
@@ -50,10 +58,6 @@ export interface AppState {
   
   // Theme Switcher State
   theme: 'dark' | 'light';
-
-  // Active OTP Passcode Verification State
-  activeAdminOtp: string | null;
-  activeCandidateOtp: string | null;
 }
 
 class Store {
@@ -65,6 +69,11 @@ class Store {
     this.state = {
       currentRole: 'Candidate',
       isAuthenticatedAdminRecruiter: false,
+      currentUser: null,
+      allowedRoles: [],
+      authReady: false,
+      candidateInviteToken: new URLSearchParams(window.location.search).get('invite'),
+      staffAccounts: [],
       settings: { ...initialSettings },
       assessments: [...sampleAssessments],
       activeAssessmentId: sampleAssessments[0].id,
@@ -91,10 +100,11 @@ class Store {
       liveProctoringAlert: null,
       proctorIntercomMessage: null,
       
-      theme: 'dark',
-      activeAdminOtp: null,
-      activeCandidateOtp: null
+      theme: 'dark'
     };
+
+    // If the server revokes/expires the session mid-use, fall back to the signed-out state.
+    authApi.setSessionExpiredHandler(() => this.clearStaffSession());
   }
 
   public toggleTheme() {
@@ -105,30 +115,6 @@ class Store {
       document.documentElement.classList.remove('light-mode');
     }
     this.notify();
-  }
-
-  public setActiveAdminOtp(otp: string) {
-    this.state.activeAdminOtp = otp;
-  }
-
-  public verifyAdminOtp(inputOtp: string): boolean {
-    const clean = (inputOtp || '').trim();
-    if (clean.length === 6) {
-      return true;
-    }
-    return false;
-  }
-
-  public setActiveCandidateOtp(otp: string) {
-    this.state.activeCandidateOtp = otp;
-  }
-
-  public verifyCandidateOtp(inputOtp: string): boolean {
-    const clean = (inputOtp || '').trim();
-    if (clean.length === 6) {
-      return true;
-    }
-    return false;
   }
 
   public getState(): AppState {
@@ -166,85 +152,85 @@ class Store {
     this.activeStreams = [];
   }
 
-  public registerStaffAccount(name: string, email: string, pass: string, role: UserRole): boolean {
-    const cleanEmail = email.trim().toLowerCase();
-    const existing = this.state.staffAccounts.find(s => s.email.toLowerCase() === cleanEmail);
-    if (existing) {
-      existing.password = pass.trim();
-      existing.role = role;
-      this.notify();
-      return true;
-    }
-
-    this.state.staffAccounts.push({
-      name: name.trim() || 'Staff Member',
-      email: cleanEmail,
-      password: pass.trim(),
-      role,
-      registeredAt: new Date().toISOString().split('T')[0]
-    });
-
-    this.notify();
-    return true;
+  // ---------------------------------------------------------------------------
+  // Authentication (state mirrors the server-verified JWT session; the backend
+  // enforces every permission, this only drives what the UI shows).
+  // ---------------------------------------------------------------------------
+  private defaultWorkspace(workspaces: UserRole[]): UserRole {
+    return (['Admin', 'Recruiter', 'Super Admin'] as UserRole[]).find(r => workspaces.includes(r)) || 'Candidate';
   }
 
-  public resetStaffPassword(email: string, newPass: string): boolean {
-    const cleanEmail = email.trim().toLowerCase();
-    const account = this.state.staffAccounts.find(s => s.email.toLowerCase() === cleanEmail);
-    if (account) {
-      account.password = newPass.trim();
-      this.notify();
-      return true;
-    }
-    // Also allow admin@7666 default reset
-    if (cleanEmail === 'admin@7666' || cleanEmail === 'admin@7666.com') {
-      this.registerStaffAccount('System Administrator', cleanEmail, newPass, 'Admin');
-      return true;
-    }
-    return false;
-  }
-
-  public validateCredentials(email?: string, password?: string): boolean {
-    return true;
-  }
-
-  // Authentication Mutators
-  public loginAdminRecruiter(role: UserRole, email?: string, password?: string): boolean {
+  /** Apply a verified staff session. `preferredRole` is honoured only if the server allows it. */
+  public loginAdminRecruiter(user: AuthUser, preferredRole?: UserRole) {
+    this.state.currentUser = user;
+    this.state.allowedRoles = user.workspaces;
     this.state.isAuthenticatedAdminRecruiter = true;
-    this.state.currentRole = role;
+    this.state.currentRole =
+      preferredRole && user.workspaces.includes(preferredRole) ? preferredRole : this.defaultWorkspace(user.workspaces);
     this.notify();
-    return true;
   }
 
-  public logoutAdminRecruiter() {
+  public markAuthReady() {
+    if (!this.state.authReady) {
+      this.state.authReady = true;
+      this.notify();
+    }
+  }
+
+  private clearStaffSession() {
     this.state.isAuthenticatedAdminRecruiter = false;
+    this.state.currentUser = null;
+    this.state.allowedRoles = [];
+    this.state.staffAccounts = [];
     this.state.currentRole = 'Candidate';
     this.notify();
+  }
+
+  public async logoutAdminRecruiter() {
+    await authApi.logout();
+    this.clearStaffSession();
   }
 
   public setRole(role: UserRole) {
     if (role === 'Candidate') {
       this.state.currentRole = 'Candidate';
       this.notify();
-    } else if (this.state.isAuthenticatedAdminRecruiter) {
+    } else if (this.state.isAuthenticatedAdminRecruiter && this.state.allowedRoles.includes(role)) {
       this.state.currentRole = role;
       this.notify();
     }
   }
 
-  public updateSettings(newSettings: Partial<SystemSettings>) {
-    this.state.settings = { ...this.state.settings, ...newSettings };
+  /** Admin+ only (server enforced): load staff accounts for the Admin portal table. */
+  public async loadStaffAccounts() {
+    try {
+      const users = await authApi.listStaff();
+      this.state.staffAccounts = users.map(u => ({
+        id: u.id,
+        name: u.name,
+        email: u.email,
+        role: u.role,
+        registeredAt: (u.createdAt || '').split('T')[0]
+      }));
+      this.notify();
+    } catch {
+      // 403 for non-admins / network issues: leave the list empty
+    }
+  }
+
+  /** Candidate passed server-side invite + OTP verification. */
+  public candidateVerified(session: CandidateSession) {
+    this.state.activeCandidateId = session.candidate.id;
+    if (this.state.assessments.some(a => a.id === session.candidate.assessmentId)) {
+      this.state.activeAssessmentId = session.candidate.assessmentId;
+    }
+    this.state.otpVerified = true;
     this.notify();
   }
 
-  public verifyOtp(otp: string): boolean {
-    const clean = (otp || '').trim();
-    if (clean.length === 6) {
-      this.state.otpVerified = true;
-      this.notify();
-      return true;
-    }
-    return false;
+  public updateSettings(newSettings: Partial<SystemSettings>) {
+    this.state.settings = { ...this.state.settings, ...newSettings };
+    this.notify();
   }
 
   public completeSystemCheck() {

@@ -507,8 +507,10 @@ export class AdminPortalModule {
     const settingsForm = this.container.querySelector('#settings-form');
     this.container.querySelector('#test-gmail-smtp-btn')?.addEventListener('click', async () => {
       const user = (this.container.querySelector('#cfg-smtp-user') as HTMLInputElement).value || 'udayrise7666@gmail.com';
-      await EmailService.sendAdminOtpEmail(user, '970598');
-      alert(`✉️ Test Email dispatched via Gmail SMTP (smtp.gmail.com:587) to ${user}! Check Dispatched Email Console for verification.`);
+      const ok = await EmailService.sendTestEmail(user);
+      alert(ok
+        ? `✉️ Test email dispatched via Gmail SMTP (smtp.gmail.com:587) to ${user}.`
+        : `⚠️ Test email to ${user} could not be delivered. Check the backend SMTP settings / server log.`);
     });
 
     settingsForm?.addEventListener('submit', (e) => {

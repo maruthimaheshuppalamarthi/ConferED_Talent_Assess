@@ -3,6 +3,7 @@ import { AdminPortalModule } from './modules/AdminPortal';
 import { CandidatePortalModule } from './modules/CandidatePortal';
 import { LiveMonitorPortalModule } from './modules/LiveMonitorPortal';
 import { RecruiterPortalModule } from './modules/RecruiterPortal';
+import { authApi } from './services/authApi';
 import { store } from './services/store';
 import './styles/index.css';
 
@@ -56,7 +57,19 @@ class App {
   }
 }
 
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
   const app = new App();
   app.render();
+
+  // Candidate invitation links must never pick up a staff session from the same browser.
+  const isCandidateLink = new URLSearchParams(window.location.search).has('invite');
+  if (!isCandidateLink) {
+    // Turn the HttpOnly refresh cookie (if any) back into an in-memory access token.
+    const session = await authApi.restoreSession();
+    if (session) {
+      store.loginAdminRecruiter(session.user);
+      void store.loadStaffAccounts();
+    }
+  }
+  store.markAuthReady();
 });
