@@ -175,9 +175,12 @@ export const authApi = {
     return refreshSession();
   },
 
+  /** Best effort: always drops the local token, never rejects (server may be unreachable). */
   async logout(): Promise<void> {
     try {
       await rawRequest('/auth/logout', 'POST', undefined, 'none');
+    } catch {
+      // Server unreachable: the refresh cookie simply expires; local sign-out still proceeds.
     } finally {
       staffToken = null;
     }

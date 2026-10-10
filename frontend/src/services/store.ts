@@ -187,8 +187,11 @@ class Store {
   }
 
   public async logoutAdminRecruiter() {
-    await authApi.logout();
-    this.clearStaffSession();
+    try {
+      await authApi.logout();
+    } finally {
+      this.clearStaffSession(); // the UI always signs out, even if the request failed
+    }
   }
 
   public setRole(role: UserRole) {

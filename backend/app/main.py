@@ -168,4 +168,7 @@ async def websocket_proctoring_endpoint(websocket: WebSocket, token: Optional[st
         manager.disconnect(websocket)
     except Exception:
         manager.disconnect(websocket)
-        await websocket.close(code=1011)
+        try:
+            await websocket.close(code=1011)
+        except Exception:
+            pass  # socket already closed by the peer

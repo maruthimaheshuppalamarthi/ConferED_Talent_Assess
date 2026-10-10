@@ -227,7 +227,16 @@ export class MonacoEditorComponent {
         { id: 'tc-1', input: 'sample', expectedOutput: 'sample', isHidden: false, weight: 10 }
       ];
 
-      const res = await CodeRunnerService.executeCode(this.currentLanguage, code, testCases);
+      let res;
+      try {
+        res = await CodeRunnerService.executeCode(this.currentLanguage, code, testCases);
+      } catch (e) {
+        runBtn.disabled = false;
+        runBtn.innerHTML = '<span>▶</span> Run Tests';
+        metricsSpan.textContent = 'Execution failed';
+        consoleOutput.textContent = `Execution failed: ${e instanceof Error ? e.message : String(e)}`;
+        return null;
+      }
 
       runBtn.disabled = false;
       runBtn.innerHTML = '<span>▶</span> Run Tests';
@@ -264,10 +273,13 @@ export class MonacoEditorComponent {
       return res;
     };
 
-    runBtn?.addEventListener('click', runExecution);
+    runBtn?.addEventListener('click', () => {
+      runExecution().catch((e) => console.error('Run failed', e));
+    });
 
     submitBtn?.addEventListener('click', async () => {
-      const res = await runExecution();
+      const res = await runExecution().catch(() => null);
+      if (!res) return; // execution failed; keep the candidate on the editor instead of saving bogus results
       const code = this.getCodeValue();
       const passedCount = res.testResults.filter(t => t.passed).length;
       const totalCount = res.testResults.length;

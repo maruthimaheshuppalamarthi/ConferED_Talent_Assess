@@ -70,7 +70,7 @@ export class CandidatePortalModule {
       this.renderOtpVerification();
     } else if (!state.systemCheckCompleted) {
       const systemCheck = new SystemCheckComponent(this.container);
-      systemCheck.render();
+      systemCheck.render().catch((e) => console.error('System check failed to render', e));
     } else if (state.examStarted && !state.examCompleted) {
       this.renderExamEngine();
       this.startTimer();
@@ -236,7 +236,7 @@ export class CandidatePortalModule {
         document.documentElement.requestFullscreen().catch(() => {});
       }
       const systemCheck = new SystemCheckComponent(this.container);
-      systemCheck.render();
+      systemCheck.render().catch((e) => console.error('System check failed to render', e));
     });
   }
 

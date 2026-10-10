@@ -316,7 +316,7 @@ export class RecruiterPortalModule {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
         const cid = (e.currentTarget as HTMLElement).getAttribute('data-copy-link');
-        if (cid) void this.reissueInviteLink(cid);
+        if (cid) this.reissueInviteLink(cid).catch(() => {});
       });
     });
 
@@ -652,7 +652,7 @@ export class RecruiterPortalModule {
     });
 
     host.querySelector('#modal-copy-link-btn')?.addEventListener('click', () => {
-      void this.reissueInviteLink(candidateId);
+      this.reissueInviteLink(candidateId).catch(() => {});
     });
 
     const notesInput = host.querySelector('#recruiter-notes') as HTMLTextAreaElement;

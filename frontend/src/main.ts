@@ -63,13 +63,23 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Candidate invitation links must never pick up a staff session from the same browser.
   const isCandidateLink = new URLSearchParams(window.location.search).has('invite');
-  if (!isCandidateLink) {
-    // Turn the HttpOnly refresh cookie (if any) back into an in-memory access token.
-    const session = await authApi.restoreSession();
-    if (session) {
-      store.loginAdminRecruiter(session.user);
-      void store.loadStaffAccounts();
+  try {
+    if (!isCandidateLink) {
+      // Turn the HttpOnly refresh cookie (if any) back into an in-memory access token.
+      const session = await authApi.restoreSession();
+      if (session) {
+        store.loginAdminRecruiter(session.user);
+        store.loadStaffAccounts().catch(() => {});
+      }
     }
+  } catch (e) {
+    console.error('Session restore failed', e);
+  } finally {
+    store.markAuthReady();
   }
-  store.markAuthReady();
+});
+
+// Safety net: surface any promise rejection that slips through instead of failing silently.
+window.addEventListener('unhandledrejection', (event) => {
+  console.error('Unhandled promise rejection:', event.reason);
 });

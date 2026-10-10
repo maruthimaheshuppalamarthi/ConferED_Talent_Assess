@@ -127,7 +127,7 @@ export class NavbarComponent {
     });
 
     this.container.querySelector('#logout-btn')?.addEventListener('click', () => {
-      void store.logoutAdminRecruiter();
+      store.logoutAdminRecruiter().catch(() => {});
     });
 
     this.container.querySelector('#theme-toggle-btn')?.addEventListener('click', () => {
@@ -162,8 +162,13 @@ export class NavbarComponent {
     return e instanceof ApiError ? e.message : 'Something went wrong. Please try again.';
   }
 
+  /** Fire-and-forget entry point for click handlers; failures are handled inside, never left unhandled. */
+  private guarded(btn: Element | null, action: () => Promise<void>): void {
+    this.runGuarded(btn, action).catch((e) => console.error('Auth action failed', e));
+  }
+
   /** Run an async auth action with the button disabled and errors shown inline. */
-  private async guarded(btn: Element | null, action: () => Promise<void>) {
+  private async runGuarded(btn: Element | null, action: () => Promise<void>) {
     const button = btn as HTMLButtonElement | null;
     if (button) button.disabled = true;
     this.errorMsg = '';
@@ -171,7 +176,11 @@ export class NavbarComponent {
       await action();
     } catch (e) {
       this.errorMsg = this.errorText(e);
-      this.renderAuthModal();
+      try {
+        this.renderAuthModal();
+      } catch {
+        // Modal was torn down while the request was in flight; nothing to update.
+      }
     } finally {
       if (button && button.isConnected) button.disabled = false;
     }
@@ -366,7 +375,7 @@ export class NavbarComponent {
           return;
         }
 
-        void this.guarded(submitBtn, async () => {
+        this.guarded(submitBtn, async () => {
           // Step 1: server verifies the password and emails a one-time passcode.
           const challenge = await authApi.login(email, password);
           this.challengeId = challenge.challengeId;
@@ -390,7 +399,7 @@ export class NavbarComponent {
           return;
         }
 
-        void this.guarded(verifyBtn, async () => {
+        this.guarded(verifyBtn, async () => {
           // Step 2: the server checks the OTP (expiry, attempts, single use) and issues the JWT session.
           const session = await authApi.verifyOtp(this.challengeId, typedOtp);
           this.challengeId = '';
@@ -398,12 +407,12 @@ export class NavbarComponent {
           host.innerHTML = '';
           this.authStep = 'credentials';
           store.loginAdminRecruiter(session.user, this.pendingRole);
-          void store.loadStaffAccounts();
+          store.loadStaffAccounts().catch(() => {});
         });
       });
 
       host.querySelector('#resend-admin-otp-btn')?.addEventListener('click', (e) => {
-        void this.guarded(e.currentTarget as Element, async () => {
+        this.guarded(e.currentTarget as Element, async () => {
           const challenge = await authApi.resendOtp(this.challengeId);
           this.challengeId = challenge.challengeId;
           this.devOtp = challenge.devOtp || '';
@@ -430,7 +439,7 @@ export class NavbarComponent {
           return;
         }
 
-        void this.guarded(regBtn, async () => {
+        this.guarded(regBtn, async () => {
           await authApi.register(name, email, pass);
           this.pendingEmail = email.toLowerCase();
           this.pendingPassword = '';
@@ -452,7 +461,7 @@ export class NavbarComponent {
           return;
         }
 
-        void this.guarded(sendResetBtn, async () => {
+        this.guarded(sendResetBtn, async () => {
           this.resetEmailTarget = email;
           const challenge = await authApi.requestPasswordReset(email);
           this.challengeId = challenge.challengeId;
@@ -478,7 +487,7 @@ export class NavbarComponent {
           return;
         }
 
-        void this.guarded(confirmResetBtn, async () => {
+        this.guarded(confirmResetBtn, async () => {
           await authApi.confirmPasswordReset(this.challengeId, otp, newPass);
           this.pendingEmail = this.resetEmailTarget;
           this.pendingPassword = '';
