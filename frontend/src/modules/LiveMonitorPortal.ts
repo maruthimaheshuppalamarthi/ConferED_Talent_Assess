@@ -1,4 +1,6 @@
+import { getPortalTab } from '../services/portalNav';
 import { store } from '../services/store';
+import { IdentityVerificationPanel } from './IdentityVerificationPanel';
 
 export class LiveMonitorPortalModule {
   private container: HTMLElement;
@@ -8,6 +10,13 @@ export class LiveMonitorPortalModule {
   }
 
   public render() {
+    // Identity & ID Verification is a separate section of the proctor menu.
+    if (getPortalTab('proctor') === 'identity-verification') {
+      this.container.innerHTML = '<div class="max-w-7xl mx-auto py-8 px-4 lg:px-8"><div id="proctor-section"></div></div>';
+      new IdentityVerificationPanel(this.container.querySelector('#proctor-section') as HTMLElement).render();
+      return;
+    }
+
     const state = store.getState();
     const liveCands = state.liveCandidates;
 

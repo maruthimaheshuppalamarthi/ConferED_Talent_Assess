@@ -1,23 +1,34 @@
 import { NavbarComponent } from './components/Navbar';
+import { SidebarComponent } from './components/Sidebar';
 import { AdminPortalModule } from './modules/AdminPortal';
 import { CandidatePortalModule } from './modules/CandidatePortal';
 import { LiveMonitorPortalModule } from './modules/LiveMonitorPortal';
 import { RecruiterPortalModule } from './modules/RecruiterPortal';
+import { AccessDeniedPage } from './pages/AccessDenied';
+import { ForcedPasswordChangePage } from './pages/ChangePassword';
+import { StaffLoginPage } from './pages/StaffLogin';
+import { Route, currentRoute, portalHomePath, router } from './router';
+import { applyPathTab, resetPortalTabs } from './services/portalNav';
+import { authApi } from './services/authApi';
 import { store } from './services/store';
+import { Portal } from './types';
 import './styles/index.css';
 
 class App {
   private appElement: HTMLElement;
   private navbarHost: HTMLElement;
   private contentHost: HTMLElement;
+  // Portals whose session restore (refresh cookie) is currently running.
+  private restoring = new Set<Portal>();
+  private wasStaffAuthenticated = false;
 
   constructor() {
     this.appElement = document.getElementById('app') as HTMLElement;
-    
+
     // Inject Layout Shell
     this.appElement.innerHTML = `
       <div class="min-h-screen flex flex-col bg-slate-950 text-slate-100">
-        <div id="navbar-host"></div>
+        <div id="navbar-host" class="sticky top-0 z-50"></div>
         <main id="content-host" class="flex-1"></main>
       </div>
     `;
@@ -25,10 +36,40 @@ class App {
     this.navbarHost = document.getElementById('navbar-host') as HTMLElement;
     this.contentHost = document.getElementById('content-host') as HTMLElement;
 
-    // Subscribe to store updates
-    store.subscribe(() => {
+    // Re-render whenever the store changes or the URL changes.
+    store.subscribe(() => this.render());
+    router.subscribe(() => {
+      this.syncSession(currentRoute()).catch(e => console.error('Session restore failed', e));
       this.render();
     });
+  }
+
+  /**
+   * Opening a staff portal URL: turn the HttpOnly refresh cookie (if any) back into an in-memory
+   * session for THAT portal. Candidate invitation links never pick up a staff session.
+   */
+  public async syncSession(route: Route): Promise<void> {
+    if (route.kind !== 'staff') return;
+    const portal = route.portal;
+    const state = store.getState();
+
+    if (state.isStaffAuthenticated) {
+      authApi.setActivePortal(portal); // an admin moving between portals keeps the same session
+      return;
+    }
+    if (this.restoring.has(portal)) return;
+
+    this.restoring.add(portal);
+    store.setAuthReady(false);
+    try {
+      const session = await authApi.restoreSession(portal);
+      if (session) store.loginStaff(session.user);
+    } catch (e) {
+      console.error('Session restore failed', e);
+    } finally {
+      this.restoring.delete(portal);
+      store.setAuthReady(true);
+    }
   }
 
   public render() {
@@ -36,27 +77,87 @@ class App {
     navbar.render();
 
     const state = store.getState();
-    const role = state.currentRole;
+    const route = currentRoute();
+
+    // A fresh sign-in (or sign-out) resets in-memory tabs; the URL then restores the open section.
+    if (state.isStaffAuthenticated !== this.wasStaffAuthenticated) {
+      this.wasStaffAuthenticated = state.isStaffAuthenticated;
+      resetPortalTabs();
+    }
+    if (route.kind === 'staff') {
+      applyPathTab(route.portal, route.section);
+      // `/admin` is the login URL; once signed in, show `/admin/dashboard` in the address bar.
+      if (state.isStaffAuthenticated && !route.section) {
+        const home = portalHomePath(route.portal);
+        if (home !== window.location.pathname) window.history.replaceState({}, '', home);
+      }
+    }
 
     this.contentHost.innerHTML = '';
 
-    if (role === 'Candidate') {
-      const candidatePortal = new CandidatePortalModule(this.contentHost);
-      candidatePortal.render();
-    } else if (role === 'Recruiter') {
-      const recruiterPortal = new RecruiterPortalModule(this.contentHost);
-      recruiterPortal.render();
-    } else if (role === 'Admin') {
-      const adminPortal = new AdminPortalModule(this.contentHost);
-      adminPortal.render();
-    } else if (role === 'Super Admin') {
-      const liveMonitor = new LiveMonitorPortalModule(this.contentHost);
-      liveMonitor.render();
+    if (route.kind === 'candidate') {
+      new CandidatePortalModule(this.contentHost).render();
+      return;
     }
+
+    // ---- staff portals (/admin, /recruiter, /proctor)
+    const portal = route.portal;
+
+    if (!state.authReady) {
+      this.contentHost.innerHTML = `
+        <div class="py-24 text-center text-xs text-slate-500 font-mono">Checking your session…</div>
+      `;
+      return;
+    }
+
+    if (!state.isStaffAuthenticated || !state.currentUser) {
+      new StaffLoginPage(this.contentHost, portal).render();
+      return;
+    }
+
+    if (!state.allowedPortals.includes(portal)) {
+      new AccessDeniedPage(this.contentHost, portal).render();
+      return;
+    }
+
+    if (state.currentUser.mustChangePassword) {
+      new ForcedPasswordChangePage(this.contentHost, portal).render();
+      return;
+    }
+
+    // Signed-in layout: one scrolling sidebar on the left, the portal page on the right.
+    const navHeight = this.navbarHost.offsetHeight;
+    this.contentHost.innerHTML = `
+      <div class="flex flex-col md:flex-row md:items-start">
+        <aside id="sidebar-host"
+          class="glass-panel w-full md:w-64 md:shrink-0 rounded-none border-0 border-b md:border-b-0 md:border-r border-slate-800 p-3 md:sticky md:overflow-y-auto"
+          style="${navHeight ? `top:${navHeight}px;height:calc(100vh - ${navHeight}px)` : ''}"></aside>
+        <div id="portal-host" class="flex-1 min-w-0"></div>
+      </div>
+    `;
+    new SidebarComponent(this.contentHost.querySelector('#sidebar-host') as HTMLElement, portal).render();
+    const portalHost = this.contentHost.querySelector('#portal-host') as HTMLElement;
+
+    if (portal === 'admin') new AdminPortalModule(portalHost).render();
+    else if (portal === 'recruiter') new RecruiterPortalModule(portalHost).render();
+    else new LiveMonitorPortalModule(portalHost).render();
   }
 }
 
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
   const app = new App();
   app.render();
+
+  try {
+    await app.syncSession(currentRoute());
+  } catch (e) {
+    console.error('Session restore failed', e);
+  } finally {
+    store.markAuthReady();
+  }
+});
+
+// Safety net: surface any promise rejection that slips through instead of failing silently.
+window.addEventListener('unhandledrejection', (event) => {
+  console.error('Unhandled promise rejection:', event.reason);
 });

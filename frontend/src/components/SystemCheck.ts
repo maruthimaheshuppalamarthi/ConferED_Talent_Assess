@@ -444,7 +444,7 @@ export class SystemCheckComponent {
     });
 
     recheckBtn?.addEventListener('click', () => {
-      this.runLiveDiagnostics();
+      this.runLiveDiagnostics().catch((e) => console.error('Hardware diagnostics failed', e));
     });
 
     btn?.addEventListener('click', () => {

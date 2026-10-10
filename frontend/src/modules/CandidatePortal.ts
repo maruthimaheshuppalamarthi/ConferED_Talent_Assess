@@ -1,6 +1,7 @@
 import { MonacoEditorComponent } from '../components/MonacoEditorComponent';
 import { ProctoringOverlayComponent } from '../components/ProctoringOverlay';
 import { SystemCheckComponent } from '../components/SystemCheck';
+import { authApi, ApiError } from '../services/authApi';
 import { store } from '../services/store';
 
 export class CandidatePortalModule {
@@ -14,7 +15,13 @@ export class CandidatePortalModule {
     this.attachFullscreenEnforcement();
   }
 
+  // The app creates a new CandidatePortalModule on every re-render; the lockdown must be wired up only once.
+  private static fullscreenEnforcementBound = false;
+
   private attachFullscreenEnforcement() {
+    if (CandidatePortalModule.fullscreenEnforcementBound) return;
+    CandidatePortalModule.fullscreenEnforcementBound = true;
+
     // Add a blocker overlay to DOM that shows when not in fullscreen
     const blocker = document.createElement('div');
     blocker.id = 'fullscreen-enforcer-overlay';
@@ -51,7 +58,7 @@ export class CandidatePortalModule {
       if (state.otpVerified && !isFeedbackSubmitted) {
         if (!document.fullscreenElement) {
           blocker.classList.remove('hidden');
-          store.addProctoringViolation('Fullscreen Exit', 'high', 'Candidate forcibly exited fullscreen lockdown mode');
+          store.logProctoringViolation('Fullscreen Exit', 'Candidate forcibly exited fullscreen lockdown mode', 'high');
         } else {
           blocker.classList.add('hidden');
         }
@@ -69,7 +76,7 @@ export class CandidatePortalModule {
       this.renderOtpVerification();
     } else if (!state.systemCheckCompleted) {
       const systemCheck = new SystemCheckComponent(this.container);
-      systemCheck.render();
+      systemCheck.render().catch((e) => console.error('System check failed to render', e));
     } else if (state.examStarted && !state.examCompleted) {
       this.renderExamEngine();
       this.startTimer();
@@ -81,6 +88,25 @@ export class CandidatePortalModule {
   }
 
   private renderOtpVerification() {
+    const inviteToken = store.getState().candidateInviteToken;
+
+    // The exam can only be opened from the personal invitation link (it carries a signed-by-server token).
+    if (!inviteToken) {
+      this.container.innerHTML = `
+        <div class="max-w-md mx-auto py-16 px-4">
+          <div class="glass-panel p-8 rounded-3xl border border-slate-800 shadow-2xl text-center space-y-4">
+            <div class="w-16 h-16 rounded-2xl bg-amber-500/10 text-amber-400 border border-amber-500/20 mx-auto flex items-center justify-center text-2xl">🔗</div>
+            <h2 class="text-2xl font-extrabold text-white tracking-tight">Invitation Link Required</h2>
+            <p class="text-xs text-slate-400 leading-relaxed">
+              This assessment can only be started from your personal invitation link. Open the email you received from the
+              recruiter and click <strong class="text-slate-200">Begin Online Assessment</strong>.
+            </p>
+          </div>
+        </div>
+      `;
+      return;
+    }
+
     this.container.innerHTML = `
       <div class="max-w-md mx-auto py-16 px-4">
         <div class="glass-panel p-8 rounded-3xl border border-slate-800 shadow-2xl text-center space-y-6">
@@ -101,7 +127,9 @@ export class CandidatePortalModule {
             <button id="verify-otp-btn" class="w-full py-3.5 px-6 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold text-sm tracking-wide shadow-lg shadow-blue-600/30 transition-all">
               VERIFY & CONTINUE ➔
             </button>
-            <p id="otp-error" class="text-xs font-semibold text-red-400 hidden">Invalid OTP passcode. Please check your email inbox for the 6-digit passcode sent to you.</p>
+            <p id="otp-error" class="text-xs font-semibold text-red-400 hidden"></p>
+            <p id="otp-info" class="text-xs font-semibold text-emerald-400 hidden"></p>
+            <button id="resend-otp-btn" type="button" class="text-[11px] font-semibold text-slate-400 hover:text-white">Didn't get a code? Resend</button>
           </div>
         </div>
       </div>
@@ -117,15 +145,55 @@ export class CandidatePortalModule {
       }
     });
 
-    btn?.addEventListener('click', () => {
+    const info = this.container.querySelector('#otp-info');
+    const showError = (msg: string) => {
+      info?.classList.add('hidden');
+      if (err) {
+        err.textContent = msg;
+        err.classList.remove('hidden');
+      }
+    };
+    const errText = (e: unknown) => (e instanceof ApiError ? e.message : 'Something went wrong. Please try again.');
+
+    btn?.addEventListener('click', async () => {
       const val = input.value.trim();
-      if (!store.verifyCandidateOtp(val)) {
-        err?.classList.remove('hidden');
-      } else {
-        if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
-          document.documentElement.requestFullscreen().catch(() => {});
+      if (val.length !== 6) {
+        showError('Enter the 6-digit passcode from your email.');
+        return;
+      }
+
+      // Request fullscreen now: it must happen inside the click's user-gesture window.
+      if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
+        document.documentElement.requestFullscreen().catch(() => {});
+      }
+
+      (btn as HTMLButtonElement).disabled = true;
+      try {
+        // Server verifies invite token + OTP (expiry, attempt limit, single use) and returns a candidate-scoped JWT.
+        const session = await authApi.candidateVerify(inviteToken, val);
+        store.candidateVerified(session);
+      } catch (e) {
+        if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+        showError(errText(e));
+        (btn as HTMLButtonElement).disabled = false;
+      }
+    });
+
+    this.container.querySelector('#resend-otp-btn')?.addEventListener('click', async (ev) => {
+      const resend = ev.currentTarget as HTMLButtonElement;
+      resend.disabled = true;
+      try {
+        const ch = await authApi.candidateResendOtp(inviteToken);
+        err?.classList.add('hidden');
+        if (info) {
+          info.textContent =
+            'A new passcode was sent to ' + ch.otpDestination + '.' + (ch.devOtp ? ` (DEV OTP: ${ch.devOtp})` : '');
+          info.classList.remove('hidden');
         }
-        store.verifyOtp(val);
+      } catch (e) {
+        showError(errText(e));
+      } finally {
+        resend.disabled = false;
       }
     });
   }
@@ -174,7 +242,7 @@ export class CandidatePortalModule {
         document.documentElement.requestFullscreen().catch(() => {});
       }
       const systemCheck = new SystemCheckComponent(this.container);
-      systemCheck.render();
+      systemCheck.render().catch((e) => console.error('System check failed to render', e));
     });
   }
 

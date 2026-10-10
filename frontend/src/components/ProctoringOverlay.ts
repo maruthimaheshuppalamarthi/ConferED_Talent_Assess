@@ -67,7 +67,7 @@ export class ProctoringOverlayComponent {
       ` : ''}
     `;
 
-    this.initVideo();
+    this.initVideo().catch((e) => console.error('Proctoring camera init failed', e));
     this.attachEvents();
   }
 

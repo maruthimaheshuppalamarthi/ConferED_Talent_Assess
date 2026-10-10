@@ -44,6 +44,17 @@ html.light-mode body {
 }
 
 /* Containers, Panels & Cards */
+/* Opaque surface for dropdown menus (glass-panel is see-through, which makes menus unreadable). */
+.menu-panel {
+  background: rgb(10, 15, 28);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+html.light-mode .menu-panel {
+  background: #ffffff !important;
+  border-color: #cbd5e1 !important;
+}
+
 html.light-mode .glass-panel {
   background: rgba(255, 255, 255, 0.96) !important;
   border-color: #cbd5e1 !important;
