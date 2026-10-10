@@ -3,7 +3,7 @@ import {
   ActivityFeed, EmailProbe, GroupValues, HealthReport, InviteStats, SecurityStats, StaffStats, adminApi,
 } from '../../services/adminApi';
 import {
-  Tone, badge, barChart, errorText, esc, formatUptime, timeAgo, toast,
+  Tone, badge, barChart, errorText, esc, formatChartTick, formatUptime, timeAgo, toast,
 } from '../../services/ui';
 import { presetStaffFilters } from './StaffPanel';
 
@@ -96,26 +96,28 @@ export class OverviewPanel {
           <div id="ov-invites"></div>
         </div>
       </div>`;
-    this.root.querySelector('#ov-refresh')?.addEventListener('click', () => this.loadAll(true));
+    this.root.querySelector('#ov-refresh')?.addEventListener('click', () => { void this.loadAll(true); });
     (Object.keys(DATA) as SlotName[]).forEach(name => this.paint(name));
     this.paintRefreshed();
-    this.loadAll();
+    void this.loadAll();
 
     window.clearInterval(timer);
     timer = window.setInterval(() => {
       if (!this.root.isConnected) return void window.clearInterval(timer);
-      this.loadAll();
+      void this.loadAll();
     }, 60_000);
   }
 
   // ------------------------------------------------------------------ loading
-  private loadAll(announce = false): void {
-    const jobs = (Object.keys(DATA) as SlotName[]).map(name => this.load(name));
-    Promise.all(jobs).then(() => {
+  private async loadAll(announce = false): Promise<void> {
+    try {
+      await Promise.all((Object.keys(DATA) as SlotName[]).map(name => this.load(name)));
       view.refreshedAt = Date.now();
       this.paintRefreshed();
       if (announce) toast('Dashboard refreshed.', 'success', 2000);
-    });
+    } catch {
+      /* each card already shows its own error */
+    }
   }
 
   private async load(name: SlotName): Promise<void> {
@@ -125,7 +127,11 @@ export class OverviewPanel {
     } catch (e) {
       DATA[name].error = errorText(e);
     }
-    this.paint(name);
+    try {
+      this.paint(name);
+    } catch {
+      /* keep the last painted card if a render throws */
+    }
   }
 
   private paintRefreshed(): void {
@@ -289,11 +295,11 @@ export class OverviewPanel {
       <div><p class="text-[10px] font-bold uppercase text-slate-500 mb-1.5">${title}</p>
         ${items.length ? `<ul class="space-y-1">${items.map(i => `<li class="flex justify-between gap-3 text-[11px]"><span class="font-mono text-slate-300 truncate">${esc(i.value)}</span><span class="text-red-400 font-bold">${i.count}</span></li>`).join('')}</ul>`
           : '<p class="text-[11px] text-slate-500">None</p>'}</div>`;
-    const points = data.series.map(p => {
-      const d = new Date(p.start);
-      const label = data.bucket === 'hour' ? `${String(d.getHours()).padStart(2, '0')}:00` : `${d.getDate()}/${d.getMonth() + 1}`;
-      return { label, ok: p.successful, bad: p.failed };
-    });
+    const points = data.series.map(p => ({
+      label: formatChartTick(p.start, data.bucket),
+      ok: p.successful,
+      bad: p.failed,
+    }));
     this.put('#ov-security', card(`
       ${heading('Sign-in security', picker)}
       <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -308,7 +314,7 @@ export class OverviewPanel {
       </div>
       <div class="mt-4">${barChart(points)}
         <div class="flex gap-4 text-[10px] text-slate-400 mt-1"><span><span class="inline-block w-2 h-2 rounded-sm bg-emerald-500"></span> successful</span><span><span class="inline-block w-2 h-2 rounded-sm bg-red-500"></span> failed / blocked</span>
-          <span>per ${data.bucket}</span></div></div>
+          <span>per ${data.bucket} (UTC)</span></div></div>
       <div class="grid grid-cols-1 md:grid-cols-3 gap-5 mt-5 pt-4 border-t border-slate-800">
         ${list('Top failing emails', data.topFailingEmails)}
         ${list('Top failing IP addresses', data.topFailingIps)}

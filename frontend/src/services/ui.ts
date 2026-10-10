@@ -22,21 +22,49 @@ export function debounce<A extends unknown[]>(fn: (...args: A) => void, ms: numb
 }
 
 // ------------------------------------------------------------------ dates
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-const pad = (n: number) => String(n).padStart(2, '0');
+const pad = (n: string | number) => String(n).padStart(2, '0');
 
-/** "10 Oct 2026, 13:51" in the viewer's local time. */
+/** IANA zone of the person looking at the screen (UTC if the runtime has none). */
+const viewerTimeZone = (): string =>
+  Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+
+/** Calendar / clock fields in an explicit IANA zone — never process-local Date getters. */
+function zoned(d: Date, timeZone: string, month: 'short' | 'numeric'): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const part of new Intl.DateTimeFormat('en-GB', {
+    timeZone, day: 'numeric', month, year: 'numeric',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  }).formatToParts(d)) {
+    if (part.type !== 'literal') out[part.type] = part.value;
+  }
+  return out;
+}
+
+/** "10 Oct 2026, 13:51" in the viewer's timezone. */
 export function formatDateTime(iso?: string | null): string {
   if (!iso) return '—';
   const d = new Date(iso);
   if (isNaN(d.getTime())) return '—';
-  return `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}, ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const t = zoned(d, viewerTimeZone(), 'short');
+  const hour = t.hour === '24' ? '00' : t.hour;
+  return `${t.day} ${t.month} ${t.year}, ${pad(hour)}:${pad(t.minute)}`;
 }
 
 export function formatDate(iso?: string | null): string {
   if (!iso) return '—';
   const d = new Date(iso);
-  return isNaN(d.getTime()) ? '—' : `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
+  if (isNaN(d.getTime())) return '—';
+  const t = zoned(d, viewerTimeZone(), 'short');
+  return `${t.day} ${t.month} ${t.year}`;
+}
+
+/** Axis label for a UTC-bucketed dashboard series ("14:00" or "10/10"). */
+export function formatChartTick(iso: string, bucket: 'hour' | 'day'): string {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '—';
+  const t = zoned(d, 'UTC', 'numeric');
+  const hour = t.hour === '24' ? '00' : t.hour;
+  return bucket === 'hour' ? `${pad(hour)}:00` : `${Number(t.day)}/${Number(t.month)}`;
 }
 
 /** "5 min ago", "3 h ago", "2 d ago" (or the date for anything older than 30 days). */
