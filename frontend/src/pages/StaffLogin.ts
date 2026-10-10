@@ -148,7 +148,8 @@ export class StaffLoginPage {
       .catch(e => this.showError(errorText(e)))
       .finally(() => {
         if (button && button.isConnected) button.disabled = false;
-      });
+      })
+      .catch(() => {});
   }
 
   private onEnter(input: Element | null, target: Element | null) {

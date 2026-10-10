@@ -147,7 +147,7 @@ export interface ConfirmOptions {
 
 /** Modal yes / no. Resolves true on confirm; false on cancel, Escape or a click outside. */
 export function confirmDialog(opts: ConfirmOptions): Promise<boolean> {
-  return new Promise(resolve => {
+  return new Promise<boolean>(resolve => {
     const overlay = document.createElement('div');
     overlay.className = 'fixed inset-0 z-[110] bg-slate-950/80 backdrop-blur-md overflow-y-auto';
     overlay.setAttribute('role', 'dialog');
@@ -182,7 +182,7 @@ export function confirmDialog(opts: ConfirmOptions): Promise<boolean> {
     document.addEventListener('keydown', onKey, true);
     document.body.appendChild(overlay);
     (overlay.querySelector('[data-act="ok"]') as HTMLElement).focus();
-  });
+  }).catch(() => false);
 }
 
 /** Generic modal shell; the caller fills `body` and wires its own buttons. Returns a close function. */
@@ -305,11 +305,6 @@ export function downloadBlob(blob: Blob, filename: string): void {
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-export async function copyText(text: string): Promise<boolean> {
-  try {
-    await navigator.clipboard.writeText(text);
-    return true;
-  } catch {
-    return false;
-  }
+export function copyText(text: string): Promise<boolean> {
+  return navigator.clipboard.writeText(text).then(() => true, () => false);
 }

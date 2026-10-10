@@ -96,28 +96,30 @@ export class OverviewPanel {
           <div id="ov-invites"></div>
         </div>
       </div>`;
-    this.root.querySelector('#ov-refresh')?.addEventListener('click', () => { void this.loadAll(true); });
+    this.root.querySelector('#ov-refresh')?.addEventListener('click', () => this.loadAll(true));
     (Object.keys(DATA) as SlotName[]).forEach(name => this.paint(name));
     this.paintRefreshed();
-    void this.loadAll();
+    this.loadAll();
 
     window.clearInterval(timer);
     timer = window.setInterval(() => {
       if (!this.root.isConnected) return void window.clearInterval(timer);
-      void this.loadAll();
+      this.loadAll();
     }, 60_000);
   }
 
   // ------------------------------------------------------------------ loading
-  private async loadAll(announce = false): Promise<void> {
-    try {
-      await Promise.all((Object.keys(DATA) as SlotName[]).map(name => this.load(name)));
+  private loadAll(announce = false): void {
+    const jobs = (Object.keys(DATA) as SlotName[]).map(name => this.load(name));
+    Promise.all(jobs).then(() => {
       view.refreshedAt = Date.now();
       this.paintRefreshed();
       if (announce) toast('Dashboard refreshed.', 'success', 2000);
-    } catch {
+    }, () => {
       /* each card already shows its own error */
-    }
+    }).catch(() => {
+      /* refresh UI threw after the cards settled */
+    });
   }
 
   private async load(name: SlotName): Promise<void> {
@@ -157,7 +159,7 @@ export class OverviewPanel {
       case 'invites': this.paintInvites(); break;
     }
     this.root.querySelectorAll<HTMLElement>('[data-retry]').forEach(b => {
-      b.onclick = () => void this.load(b.getAttribute('data-retry') as SlotName);
+      b.onclick = () => { this.load(b.getAttribute('data-retry') as SlotName).catch(() => {}); };
     });
     this.root.querySelectorAll<HTMLElement>('[data-goto]').forEach(b => {
       b.onclick = () => this.navigate(b.getAttribute('data-goto') as string);
@@ -200,7 +202,7 @@ export class OverviewPanel {
        ${probe ? `<p class="${probe.ok ? 'text-emerald-400' : 'text-red-400'} font-semibold break-words">${probe.ok ? '✓' : '✗'} ${esc(probe.message)}</p>` : ''}
        <button type="button" data-goto="settings:email" class="text-blue-400 hover:text-blue-300 font-semibold">Email settings →</button>`,
       ok ? 'text-purple-400' : 'text-amber-400'));
-    this.root.querySelector('#ov-probe')?.addEventListener('click', () => void this.probeEmail());
+    this.root.querySelector('#ov-probe')?.addEventListener('click', () => { this.probeEmail().catch(() => {}); });
 
     const rows = data.components.map(c => `
       <li class="py-2.5 border-b border-slate-800/60 last:border-0">
@@ -221,8 +223,8 @@ export class OverviewPanel {
   private async probeEmail(): Promise<void> {
     if (view.probing) return;
     view.probing = true;
-    this.paintHealth();
     try {
+      this.paintHealth();
       view.probe = await adminApi.dashboard.probeEmail();
       toast(view.probe.ok ? 'Email gateway connected.' : view.probe.message, view.probe.ok ? 'success' : 'error');
     } catch (e) {
@@ -230,7 +232,7 @@ export class OverviewPanel {
       toast(errorText(e), 'error');
     } finally {
       view.probing = false;
-      this.paintHealth();
+      try { this.paintHealth(); } catch { /* keep the last painted card */ }
     }
   }
 
@@ -332,7 +334,7 @@ export class OverviewPanel {
       view.hours = Number((e.currentTarget as HTMLSelectElement).value);
       DATA.security.data = null;
       this.paintSecurity();
-      void this.load('security');
+      this.load('security').catch(() => {});
     });
   }
 
