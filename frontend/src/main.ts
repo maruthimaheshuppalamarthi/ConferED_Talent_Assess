@@ -10,6 +10,7 @@ import { StaffLoginPage } from './pages/StaffLogin';
 import { Route, currentRoute, portalHomePath, router } from './router';
 import { applyPathTab, resetPortalTabs } from './services/portalNav';
 import { authApi } from './services/authApi';
+import { candidateAssist } from './services/candidateAssist';
 import { store } from './services/store';
 import { Portal } from './types';
 import './styles/index.css';
@@ -97,8 +98,11 @@ class App {
 
     if (route.kind === 'candidate') {
       new CandidatePortalModule(this.contentHost).render();
+      if (state.otpVerified) candidateAssist.mount();
+      else candidateAssist.hide();
       return;
     }
+    candidateAssist.hide();
 
     // ---- staff portals (/admin, /recruiter, /proctor)
     const portal = route.portal;

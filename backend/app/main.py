@@ -18,6 +18,7 @@ from app.api import candidate as candidate_api
 from app.api import policy as policy_api
 from app.api import proctor as proctor_api
 from app.api import recruiter as recruiter_api
+from app.api import recruiter_extended as recruiter_extended_api
 from app.api.deps import get_current_principal
 from app.api.staff_auth import build_staff_auth_router
 from app.core.config import settings
@@ -50,7 +51,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
     # the browser app may read these (rate-limit back-off, CSV download name / truncation flag)
     expose_headers=["Retry-After", "Content-Disposition", "X-Export-Truncated"],
@@ -101,8 +102,10 @@ app.include_router(admin_dashboard_api.router, prefix=settings.API_V1_STR)
 app.include_router(admin_dashboard_api.public_router)  # /health, /health/ready (no auth, no details)
 app.include_router(policy_api.router, prefix=settings.API_V1_STR)
 app.include_router(recruiter_api.router, prefix=settings.API_V1_STR)
+app.include_router(recruiter_extended_api.router, prefix=settings.API_V1_STR)
 app.include_router(candidate_api.router, prefix=settings.API_V1_STR)
 app.include_router(proctor_api.router)  # WebSocket: /ws/proctoring
+app.include_router(proctor_api.desk, prefix=settings.API_V1_STR)
 
 
 class CodeRunRequest(BaseModel):

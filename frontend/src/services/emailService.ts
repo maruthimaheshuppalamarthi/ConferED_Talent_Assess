@@ -9,8 +9,11 @@ export interface DispatchedEmail {
   bodyHtml: string;
   otpCode?: string;
   assessmentLink?: string;
+  assessmentTitle?: string;
+  durationMinutes?: number;
+  expiresAt?: string;
   sentAt: string;
-  status: 'Delivered' | 'Sent' | 'Delivering';
+  status: 'Delivered' | 'Sent' | 'Delivering' | 'Failed';
   provider: string;
 }
 
@@ -29,20 +32,26 @@ export class EmailService {
     recipientName: string,
     recipientEmail: string,
     assessmentLink: string,
-    devOtp?: string | null
+    devOtp?: string | null,
+    meta?: { assessmentTitle?: string; durationMinutes?: number; expiresAt?: string },
   ): DispatchedEmail {
+    const title = meta?.assessmentTitle || 'Assessment';
+    const mins = meta?.durationMinutes ?? 60;
     const entry: DispatchedEmail = {
       id: `email-${Date.now()}`,
       recipientEmail,
       recipientName,
-      subject: 'Assessment Invitation',
-      bodyText: `Hello ${recipientName}, you have been invited to complete an assessment.`,
+      subject: `Invitation: ${title}`,
+      bodyText: `Hello ${recipientName}, you have been invited to ${title} (${mins} min). Link: ${assessmentLink}`,
       bodyHtml: '',
-      otpCode: devOtp || undefined, // only available when the backend runs in dev mode
+      otpCode: devOtp || undefined,
       assessmentLink,
+      assessmentTitle: title,
+      durationMinutes: mins,
+      expiresAt: meta?.expiresAt,
       sentAt: new Date().toLocaleString(),
       status: 'Delivered',
-      provider: 'Gmail SMTP (server-side)'
+      provider: 'Gmail SMTP (server-side)',
     };
     this.sentEmails.unshift(entry);
     return entry;
@@ -61,7 +70,7 @@ export class EmailService {
       bodyHtml,
       sentAt: new Date().toLocaleString(),
       status: 'Delivering',
-      provider: 'Gmail SMTP (server-side)'
+      provider: 'Gmail SMTP (server-side)',
     };
     this.sentEmails.unshift(entry);
 
@@ -70,12 +79,12 @@ export class EmailService {
         recipientEmail,
         recipientName: 'Admin',
         subject,
-        bodyHtml
+        bodyHtml,
       });
       entry.status = res.status === 'success' ? 'Delivered' : 'Sent';
       return res.status === 'success';
     } catch {
-      entry.status = 'Sent';
+      entry.status = 'Failed';
       return false;
     }
   }

@@ -418,6 +418,81 @@ def test_candidate_flow_and_scoping(client, no_real_email):
     assert r.status_code == 200
 
 
+_TINY_JPEG = bytes.fromhex(
+    "ffd8ffe000104a46494600010100000100010000ffdb004300080606070605080707070909080a0c140d0c0b0b0c"
+    "1912130f141d1a1f1e1d1a1c1c20242e2720222c231c1c2837292c30313434341f27393d38323c2e333432ffc0000b"
+    "080001000101011100ffc4001f0000010501010101010100000000000000000102030405060708090a0bffda000800"
+    "01000100003f00fbffd9"
+)
+
+
+def test_candidate_identity_stores_jpeg_for_that_candidate(client):
+    import base64
+
+    admin = admin_token(client)
+    token = ready_staff(client, admin, "recruiter", "jpeg.rec@corp.com", "Recruiter")
+    invited = client.post(
+        f"{API}/recruiter/candidates/invites", headers=bearer(token),
+        json={"name": "Asha Rao", "email": "asha.rao@example.com", "phone": "9000000001",
+              "assessmentId": "assess-101"},
+    )
+    assert invited.status_code == 201, invited.text
+    inv = invited.json()
+    invite_token = inv["link"].split("invite=")[1]
+    verified = client.post(f"{API}/candidate/verify", json={"inviteToken": invite_token, "otp": inv["devOtp"]})
+    assert verified.status_code == 200, verified.text
+    access = verified.json()["accessToken"]
+    jpeg = "data:image/jpeg;base64," + base64.b64encode(_TINY_JPEG).decode()
+    checks = {
+        "cameraPassed": True, "microphonePassed": True, "microphoneDb": -28,
+        "networkPassed": True, "pingMs": 42, "browserPassed": True,
+        "screenWidth": 1920, "screenHeight": 1080, "singleMonitor": True,
+    }
+
+    photo = client.post(f"{API}/candidate/identity", headers=bearer(access), json={
+        "kind": "photo", "image": jpeg, "systemCheck": checks,
+    })
+    assert photo.status_code == 200, photo.text
+    saved = photo.json()
+    assert saved["candidateId"] == inv["candidateId"]
+    assert saved["name"] == "Asha Rao"
+    assert saved["email"] == "asha.rao@example.com"
+    assert saved["format"] == "image/jpeg"
+    assert saved["livePhotoStored"] is True
+    assert saved["bytes"] == len(_TINY_JPEG)
+
+    assert client.post(f"{API}/candidate/identity", headers=bearer(access), json={
+        "kind": "id", "idDocumentType": "college", "image": jpeg,
+    }).status_code == 400
+    assert client.post(f"{API}/candidate/identity", headers=bearer(access), json={
+        "kind": "photo", "image": "data:image/png;base64,aaaa",
+    }).status_code == 400
+
+    id_card = client.post(f"{API}/candidate/identity", headers=bearer(access), json={
+        "kind": "id", "idDocumentType": "aadhaar", "image": jpeg, "systemCheck": checks,
+    })
+    assert id_card.status_code == 200, id_card.text
+    assert id_card.json()["idProofStored"] is True
+    assert id_card.json()["idDocumentType"] == "aadhaar"
+    assert id_card.json()["systemCheckPassed"] is True
+
+    detail = client.get(f"{API}/recruiter/candidates/{inv['candidateId']}", headers=bearer(token))
+    assert detail.status_code == 200, detail.text
+    row = detail.json()
+    assert row["name"] == "Asha Rao"
+    assert row["email"] == "asha.rao@example.com"
+    assert row["livePhotoUrl"] == f"identity/{inv['candidateId']}/photo.jpg"
+    assert row["idProofUrl"] == f"identity/{inv['candidateId']}/id.jpg"
+    assert not row["livePhotoUrl"].startswith("data:")
+    from app.services.identity_bucket import read_jpeg
+    assert read_jpeg(row["livePhotoUrl"]) == _TINY_JPEG
+    assert read_jpeg(row["idProofUrl"]) == _TINY_JPEG
+    assert row["idDocumentType"] == "aadhaar"
+    assert row["systemCheck"]["pingMs"] == 42
+    assert row["systemCheck"]["microphoneDb"] == -28
+    assert row["identityStatus"] == "pending_verification"
+
+
 def test_candidate_otp_resend(client):
     admin = admin_token(client)
     inv = create_invite(client, admin)
@@ -448,11 +523,23 @@ def test_websocket_requires_valid_token_and_scopes_events(client):
 
     # the Proctor receives the stream
     with client.websocket_connect(f"/ws/proctoring?token={proctor}") as p_ws:
+        assert p_ws.receive_json()["type"] == "inbox"
         with client.websocket_connect(f"/ws/proctoring?token={cand}") as cws:
+            assert cws.receive_json()["type"] == "history"
             cws.send_json({"candidateId": "someone-else", "event": "Tab Switch", "severity": "high"})
             msg = p_ws.receive_json()
             assert msg["candidateId"] == inv["candidateId"]  # spoofed id ignored
             assert msg["event"] == "Tab Switch"
+            cws.send_json({"type": "chat", "text": "I cannot see the timer"})
+            chat = p_ws.receive_json()
+            assert chat["type"] == "chat" and chat["from"] == "candidate"
+            assert chat["text"] == "I cannot see the timer"
+            p_ws.send_json({"type": "chat", "candidateId": inv["candidateId"], "text": "Stay on this screen"})
+            reply = cws.receive_json()
+            assert reply["from"] == "proctor" and reply["text"] == "Stay on this screen"
+            p_ws.send_json({"type": "audio", "candidateId": inv["candidateId"], "pcm": "AAAA"})
+            audio = cws.receive_json()
+            assert audio["type"] == "audio" and audio["pcm"] == "AAAA"
 
 
 def test_only_proctor_receives_proctoring_stream():
@@ -480,6 +567,29 @@ def test_only_proctor_receives_proctoring_stream():
     assert sockets["System Admin"].received == []  # admins manage people, they do not proctor
     assert sockets["Recruiter"].received == []
     assert candidate.received == []
+
+
+def test_proctor_admits_candidate_after_uploads(client):
+    import base64
+    admin = admin_token(client)
+    proctor = ready_staff(client, admin, "proctor", "admit.proctor@corp.com", "Proctor", final_password="ProctorPass123")
+    inv = create_invite(client, admin)
+    token = inv["link"].split("invite=")[1]
+    access = client.post(f"{API}/candidate/verify", json={"inviteToken": token, "otp": inv["devOtp"]}).json()["accessToken"]
+    jpeg = "data:image/jpeg;base64," + base64.b64encode(_TINY_JPEG).decode()
+    assert client.post(f"{API}/candidate/identity", headers=bearer(access), json={"kind": "photo", "image": jpeg}).status_code == 200
+    assert client.post(f"{API}/candidate/identity", headers=bearer(access), json={
+        "kind": "id", "idDocumentType": "pan", "image": jpeg,
+    }).status_code == 200
+    listed = client.get(f"{API}/proctor/identity", headers=bearer(proctor))
+    assert listed.status_code == 200, listed.text
+    assert any(row["id"] == inv["candidateId"] and row["idDocumentType"] == "pan" for row in listed.json()["items"])
+    photo = client.get(f"{API}/proctor/identity/{inv['candidateId']}/photo.jpg", headers=bearer(proctor))
+    assert photo.status_code == 200 and photo.content.startswith(b"\xff\xd8\xff")
+    assert client.get(f"{API}/candidate/gate", headers=bearer(access)).json()["admitted"] is False
+    admitted = client.post(f"{API}/proctor/identity/{inv['candidateId']}/admit", headers=bearer(proctor))
+    assert admitted.status_code == 200, admitted.text
+    assert client.get(f"{API}/candidate/gate", headers=bearer(access)).json()["admitted"] is True
 
 
 # ------------------------------------------------------------------- migration

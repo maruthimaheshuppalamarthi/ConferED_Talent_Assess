@@ -7,8 +7,8 @@ import { store } from '../services/store';
 export class CandidatePortalModule {
   private container: HTMLElement;
   private timerInterval: any = null;
-  private selectedRating: number = 5;
-  private selectedFeedbackTags: Set<string> = new Set(['Clear Instructions', 'Smooth Coding IDE']);
+  private selectedRating: number = 0;
+  private feedbackDraft = '';
 
   constructor(container: HTMLElement) {
     this.container = container;
@@ -32,10 +32,9 @@ export class CandidatePortalModule {
           ⚠️
         </div>
         <div>
-          <h2 class="text-xl font-extrabold text-white">Fullscreen Lockdown Violation</h2>
-          <p class="text-sm text-slate-300 mt-2">
-            This assessment requires strict fullscreen mode. You have exited fullscreen, which is a proctoring violation. 
-            Please return to fullscreen immediately to resume your assessment.
+          <h2 id="fullscreen-enforcer-title" class="text-xl font-extrabold text-white">Fullscreen required</h2>
+          <p id="fullscreen-enforcer-copy" class="text-sm text-slate-300 mt-2">
+            The proctor has admitted you. Enter fullscreen to continue the assessment.
           </p>
         </div>
         <button id="resume-fullscreen-btn" class="w-full py-4 px-6 rounded-2xl bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-500 hover:to-rose-500 text-white font-bold tracking-wide shadow-xl shadow-red-600/30 transition-all flex items-center justify-center gap-2">
@@ -53,20 +52,32 @@ export class CandidatePortalModule {
 
     document.addEventListener('fullscreenchange', () => {
       const state = store.getState();
-      // Only enforce if OTP is verified and feedback is NOT yet submitted
-      const isFeedbackSubmitted = state.candidateFeedback !== null;
-      if (state.otpVerified && !isFeedbackSubmitted) {
-        if (!document.fullscreenElement) {
-          blocker.classList.remove('hidden');
-          store.logProctoringViolation('Fullscreen Exit', 'Candidate forcibly exited fullscreen lockdown mode', 'high');
-        } else {
-          blocker.classList.add('hidden');
+      const finished = state.candidateFeedback !== null || state.examCompleted;
+      if (!state.examStarted || finished) {
+        blocker.classList.add('hidden');
+        return;
+      }
+      const title = blocker.querySelector('#fullscreen-enforcer-title');
+      const copy = blocker.querySelector('#fullscreen-enforcer-copy');
+      if (!document.fullscreenElement) {
+        blocker.classList.remove('hidden');
+        if (CandidatePortalModule.wasFullscreen) {
+          if (title) title.textContent = 'Fullscreen Lockdown Violation';
+          if (copy) copy.textContent = 'You left fullscreen. That is a proctoring violation. Return to fullscreen to continue.';
+          store.logProctoringViolation('Fullscreen Exit', 'Candidate left fullscreen lockdown', 'high');
+        } else if (title && copy) {
+          title.textContent = 'Fullscreen required';
+          copy.textContent = 'Enter fullscreen to continue the assessment.';
         }
+        CandidatePortalModule.wasFullscreen = false;
       } else {
+        CandidatePortalModule.wasFullscreen = true;
         blocker.classList.add('hidden');
       }
     });
   }
+
+  private static wasFullscreen = false;
 
   public render() {
     const state = store.getState();
@@ -124,7 +135,7 @@ export class CandidatePortalModule {
               <input id="otp-input" type="text" maxlength="6" value="" class="glass-input w-full px-4 py-3 rounded-xl text-center font-mono text-xl tracking-[0.5em] font-bold border border-slate-700 bg-slate-950 text-emerald-400 focus:ring-2 focus:ring-emerald-500" placeholder="------" />
             </div>
 
-            <button id="verify-otp-btn" class="w-full py-3.5 px-6 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold text-sm tracking-wide shadow-lg shadow-blue-600/30 transition-all">
+            <button type="button" id="verify-otp-btn" class="w-full py-3.5 px-6 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold text-sm tracking-wide shadow-lg shadow-blue-600/30 transition-all">
               VERIFY & CONTINUE ➔
             </button>
             <p id="otp-error" class="text-xs font-semibold text-red-400 hidden"></p>
@@ -156,26 +167,23 @@ export class CandidatePortalModule {
     const errText = (e: unknown) => (e instanceof ApiError ? e.message : 'Something went wrong. Please try again.');
 
     btn?.addEventListener('click', async () => {
-      const val = input.value.trim();
+      const button = btn as HTMLButtonElement;
+      const val = input.value.replace(/\D/g, '');
       if (val.length !== 6) {
         showError('Enter the 6-digit passcode from your email.');
         return;
       }
 
-      // Request fullscreen now: it must happen inside the click's user-gesture window.
-      if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
-        document.documentElement.requestFullscreen().catch(() => {});
-      }
-
-      (btn as HTMLButtonElement).disabled = true;
+      button.disabled = true;
+      button.textContent = 'VERIFYING...';
       try {
         // Server verifies invite token + OTP (expiry, attempt limit, single use) and returns a candidate-scoped JWT.
         const session = await authApi.candidateVerify(inviteToken, val);
         store.candidateVerified(session);
       } catch (e) {
-        if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
         showError(errText(e));
-        (btn as HTMLButtonElement).disabled = false;
+        button.disabled = false;
+        button.textContent = 'VERIFY & CONTINUE ➔';
       }
     });
 
@@ -404,29 +412,27 @@ export class CandidatePortalModule {
   }
 
   private renderAnswerWidget(question: any, existingAnswer: any): string {
-    if (question.type === 'mcq') {
-      const opts = (question.options && question.options.length > 0) ? question.options : [
-        { id: 'opt-1', text: 'Reference Counting & Generational GC' },
-        { id: 'opt-2', text: 'Manual memory allocation with malloc and free' },
-        { id: 'opt-3', text: 'Mark and sweep garbage collection only' },
-        { id: 'opt-4', text: 'All of the above' }
-      ];
+    if (question.type === 'mcq' || question.type === 'msq') {
+      const opts = (question.options && question.options.length > 0) ? question.options : [];
+      const multi = question.type === 'msq' || question.selectionMode === 'multi';
+      const selected = multi
+        ? (Array.isArray(existingAnswer) ? existingAnswer : [])
+        : existingAnswer;
 
       return `
         <div class="space-y-2.5">
-          <span class="text-xs font-bold text-slate-400 uppercase tracking-wider">Select Multiple Choice Answer Option:</span>
+          <span class="text-xs font-bold text-slate-400 uppercase tracking-wider">${multi ? 'Select all that apply:' : 'Select one option:'}</span>
           ${opts.map((opt: any, idx: number) => {
             const optId = typeof opt === 'string' ? `opt-${idx + 1}` : (opt.id || `opt-${idx + 1}`);
             const optText = typeof opt === 'string' ? opt : (opt.text || `Option ${idx + 1}`);
-            const isSelected = existingAnswer === optId || existingAnswer === optText;
-
+            const isSelected = multi ? selected.includes(optId) : (selected === optId || selected === optText);
             return `
               <label class="flex items-center gap-3 p-3.5 rounded-xl border transition-all cursor-pointer ${
                 isSelected
                   ? 'bg-blue-600/10 border-blue-500/50 text-white shadow-sm ring-1 ring-blue-500/20'
                   : 'bg-slate-900/60 border-slate-800 text-slate-300 hover:bg-slate-850 hover:border-slate-700'
               }">
-                <input type="radio" name="mcq-option" value="${optId}" ${isSelected ? 'checked' : ''} class="w-4 h-4 text-blue-600 bg-slate-950 border-slate-700 focus:ring-blue-500" />
+                <input type="${multi ? 'checkbox' : 'radio'}" name="mcq-option" value="${optId}" ${isSelected ? 'checked' : ''} class="w-4 h-4 text-blue-600 bg-slate-950 border-slate-700 focus:ring-blue-500" />
                 <span class="text-xs font-medium">${optText}</span>
               </label>
             `;
@@ -434,17 +440,76 @@ export class CandidatePortalModule {
         </div>
       `;
     }
+
+    if (question.type === 'drag_drop') {
+      const opts = [...(question.options || [])];
+      // The server froze this order on the attempt. Keep it so a refresh does not reshuffle.
+      const order: string[] = Array.isArray(existingAnswer) && existingAnswer.length
+        ? existingAnswer
+        : opts.map((o: any) => o.id);
+      const byId = Object.fromEntries(opts.map((o: any) => [o.id, o]));
+      return `
+        <div class="space-y-2">
+          <span class="text-xs font-bold text-slate-400 uppercase tracking-wider">Drag items into the correct order:</span>
+          <ul id="drag-list" class="space-y-2">
+            ${order.map((id, idx) => `
+              <li draggable="true" data-drag-id="${id}" class="drag-item flex items-center gap-3 p-3.5 rounded-xl border border-slate-700 bg-slate-900/80 text-slate-200 cursor-grab active:cursor-grabbing">
+                <span class="text-slate-500 font-mono text-[10px] w-5">${idx + 1}</span>
+                <span class="text-xs font-medium flex-1">${(byId[id]?.text) || id}</span>
+                <span class="text-slate-600 text-sm">⠿</span>
+              </li>
+            `).join('')}
+          </ul>
+        </div>
+      `;
+    }
     return ``;
   }
 
   private attachExamEvents(currentQuestion: any) {
-    this.container.querySelectorAll('input[name="mcq-option"]').forEach(radio => {
-      radio.addEventListener('change', (e) => {
-        const val = (e.target as HTMLInputElement).value;
-        store.setAnswer(currentQuestion.id, val);
+    this.container.querySelectorAll('input[name="mcq-option"]').forEach(input => {
+      input.addEventListener('change', () => {
+        const multi = currentQuestion.type === 'msq' || currentQuestion.selectionMode === 'multi';
+        if (multi) {
+          const vals = Array.from(this.container.querySelectorAll('input[name="mcq-option"]:checked'))
+            .map(el => (el as HTMLInputElement).value);
+          store.setAnswer(currentQuestion.id, vals);
+        } else {
+          const checked = this.container.querySelector('input[name="mcq-option"]:checked') as HTMLInputElement | null;
+          if (checked) store.setAnswer(currentQuestion.id, checked.value);
+        }
         this.renderExamEngine();
       });
     });
+
+    // Drag-and-drop ordering
+    const list = this.container.querySelector('#drag-list');
+    if (list) {
+      let dragEl: HTMLElement | null = null;
+      list.querySelectorAll('.drag-item').forEach(item => {
+        item.addEventListener('dragstart', e => {
+          dragEl = item as HTMLElement;
+          (e as DragEvent).dataTransfer?.setData('text/plain', '');
+          item.classList.add('opacity-50');
+        });
+        item.addEventListener('dragend', () => {
+          item.classList.remove('opacity-50');
+          dragEl = null;
+          const ids = Array.from(list.querySelectorAll('.drag-item')).map(
+            el => (el as HTMLElement).getAttribute('data-drag-id') || '',
+          );
+          store.setAnswer(currentQuestion.id, ids, false);
+        });
+        item.addEventListener('dragover', e => {
+          e.preventDefault();
+          const over = item as HTMLElement;
+          if (!dragEl || dragEl === over) return;
+          const rect = over.getBoundingClientRect();
+          const before = (e as DragEvent).clientY < rect.top + rect.height / 2;
+          list.insertBefore(dragEl, before ? over : over.nextSibling);
+        });
+      });
+    }
 
     const essayEditor = this.container.querySelector('#essay-editor') as HTMLTextAreaElement;
     const wordCountSpan = this.container.querySelector('#word-count');
@@ -563,14 +628,7 @@ export class CandidatePortalModule {
     const state = store.getState();
     const isSubmitted = state.candidateFeedback !== null;
 
-    const availableTags = [
-      'Clear Instructions',
-      'Smooth Coding IDE',
-      'Fair Proctoring',
-      'Responsive UI',
-      'Good Question Difficulty'
-    ];
-
+    const starsChosen = this.selectedRating >= 1;
     this.container.innerHTML = `
       <div class="max-w-2xl mx-auto py-12 px-4 space-y-6">
         <!-- Hardware Stopped & Exit Fullscreen Confirmation Badge -->
@@ -614,41 +672,22 @@ export class CandidatePortalModule {
               <!-- Interactive 5-Star Rating Selector -->
               <div class="flex justify-center items-center gap-3">
                 ${[1, 2, 3, 4, 5].map(star => `
-                  <button data-star="${star}" class="star-btn text-3xl transition-transform hover:scale-125 focus:outline-none ${
+                  <button type="button" data-star="${star}" class="star-btn text-3xl transition-transform hover:scale-125 focus:outline-none ${
                     star <= this.selectedRating ? 'text-amber-400' : 'text-slate-700'
                   }">
                     ★
                   </button>
                 `).join('')}
               </div>
+              <p class="text-center text-[11px] text-slate-500">A star rating is required.</p>
 
-              <!-- Experience Tags -->
               <div>
-                <label class="block text-xs font-semibold text-slate-300 mb-2">Highlight What Went Well:</label>
-                <div class="flex flex-wrap gap-2">
-                  ${availableTags.map(tag => {
-                    const isSel = this.selectedFeedbackTags.has(tag);
-                    return `
-                      <button data-tag="${tag}" class="tag-btn px-3 py-1.5 rounded-xl text-xs font-medium transition-all border ${
-                        isSel
-                          ? 'bg-blue-600 text-white border-blue-500 shadow-md'
-                          : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-slate-200'
-                      }">
-                        ${isSel ? '✓ ' : ''}${tag}
-                      </button>
-                    `;
-                  }).join('')}
-                </div>
+                <label class="block text-xs font-semibold text-slate-300 mb-1.5">Comments (optional):</label>
+                <textarea id="feedback-text" rows="3" class="w-full p-3 glass-input rounded-xl text-xs text-white border border-slate-700 bg-slate-950 focus:ring-2 focus:ring-blue-500 outline-none" placeholder="Optional comments">${this.feedbackDraft.replace(/</g, '&lt;')}</textarea>
               </div>
 
-              <!-- Feedback Textarea -->
-              <div>
-                <label class="block text-xs font-semibold text-slate-300 mb-1.5">Additional Comments / Suggestions (Optional):</label>
-                <textarea id="feedback-text" rows="3" class="w-full p-3 glass-input rounded-xl text-xs text-white border border-slate-700 bg-slate-950 focus:ring-2 focus:ring-blue-500 outline-none" placeholder="Share your experience regarding the test questions, coding IDE, or proctoring..."></textarea>
-              </div>
-
-              <button id="submit-feedback-btn" class="w-full py-3.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold text-xs tracking-wider shadow-lg shadow-blue-600/30 transition-all">
-                SUBMIT RATING & FEEDBACK ➔
+              <button id="submit-feedback-btn" type="button" ${starsChosen ? '' : 'disabled'} class="w-full py-3.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-bold text-xs tracking-wider shadow-lg shadow-blue-600/30 transition-all ${starsChosen ? 'hover:from-blue-500 hover:to-indigo-500' : 'opacity-50 cursor-not-allowed'}">
+                SUBMIT AND EXIT
               </button>
             </div>
           ` : `
@@ -685,34 +724,41 @@ export class CandidatePortalModule {
     });
 
     // Star rating click handler
+    this.container.querySelector('#feedback-text')?.addEventListener('input', (e) => {
+      this.feedbackDraft = (e.currentTarget as HTMLTextAreaElement).value;
+    });
+
     this.container.querySelectorAll('.star-btn').forEach(starBtn => {
       starBtn.addEventListener('click', (e) => {
-        const star = parseInt((e.currentTarget as HTMLElement).getAttribute('data-star') || '5', 10);
+        const star = parseInt((e.currentTarget as HTMLElement).getAttribute('data-star') || '0', 10);
+        const textInput = this.container.querySelector('#feedback-text') as HTMLTextAreaElement | null;
+        this.feedbackDraft = textInput?.value || this.feedbackDraft;
         this.selectedRating = star;
         this.renderCompletionScreen();
       });
     });
 
-    // Tag button toggle handler
-    this.container.querySelectorAll('.tag-btn').forEach(tagBtn => {
-      tagBtn.addEventListener('click', (e) => {
-        const tag = (e.currentTarget as HTMLElement).getAttribute('data-tag') || '';
-        if (this.selectedFeedbackTags.has(tag)) {
-          this.selectedFeedbackTags.delete(tag);
-        } else {
-          this.selectedFeedbackTags.add(tag);
-        }
-        this.renderCompletionScreen();
-      });
-    });
-
-    // Submit feedback button handler
     const submitBtn = this.container.querySelector('#submit-feedback-btn');
     submitBtn?.addEventListener('click', () => {
+      if (this.selectedRating < 1) return;
       const textInput = this.container.querySelector('#feedback-text') as HTMLTextAreaElement;
-      const text = textInput ? textInput.value.trim() : '';
-      store.saveCandidateFeedback(this.selectedRating, text, Array.from(this.selectedFeedbackTags));
-      this.renderCompletionScreen();
+      const text = textInput ? textInput.value.trim() : this.feedbackDraft.trim();
+      submitBtn.setAttribute('disabled', 'true');
+      store.saveCandidateFeedback(this.selectedRating, text).then(() => {
+        this.renderCompletionScreen();
+      }).catch(() => {
+        submitBtn.removeAttribute('disabled');
+      });
     });
   }
+}
+
+export function requestExamFullscreen() {
+  const blocker = document.getElementById('fullscreen-enforcer-overlay');
+  const request = document.documentElement.requestFullscreen?.();
+  if (!request) {
+    blocker?.classList.remove('hidden');
+    return;
+  }
+  request.catch(() => blocker?.classList.remove('hidden'));
 }

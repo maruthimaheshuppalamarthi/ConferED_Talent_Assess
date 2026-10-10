@@ -1,6 +1,7 @@
 import { Assessment, Candidate, CandidateResult, LiveCandidate, Portal, Question, SystemSettings, ProctoringViolation } from '../types';
 import { initialSettings, sampleAssessments, sampleCandidateResults, sampleCandidates, sampleLiveCandidates, sampleQuestions } from './mockData';
 import { authApi, AuthUser, CandidateSession } from './authApi';
+import { sanitizeAssessmentQuestions } from './questionSanitize';
 
 export interface CandidateFeedback {
   rating: number; // 1 to 5
@@ -57,16 +58,21 @@ class Store {
   private activeStreams: MediaStream[] = [];
 
   constructor() {
+    const params = new URLSearchParams(window.location.search);
+    const assessmentFromLink = params.get('assessment');
     this.state = {
       isStaffAuthenticated: false,
       currentUser: null,
       allowedPortals: [],
       authReady: false,
-      candidateInviteToken: new URLSearchParams(window.location.search).get('invite'),
+      candidateInviteToken: params.get('invite'),
       liveCandidates: sampleLiveCandidates.map(c => ({ ...c })),
       settings: { ...initialSettings },
       assessments: [...sampleAssessments],
-      activeAssessmentId: sampleAssessments[0].id,
+      activeAssessmentId: (assessmentFromLink
+        && sampleAssessments.some(a => a.id === assessmentFromLink)
+        ? assessmentFromLink
+        : sampleAssessments[0].id),
       candidates: [...sampleCandidates],
       candidateResults: { ...sampleCandidateResults },
       questionBank: [...sampleQuestions],
@@ -218,6 +224,28 @@ class Store {
     this.state.otpVerified = true;
     this.notify();
     void this.loadPolicy('candidate');
+    void this.loadCandidateAssessment(session.candidate.assessmentId);
+  }
+
+  /** Load sanitized assessment from API (no correct answers). Falls back to local sanitized mock. */
+  public async loadCandidateAssessment(assessmentId: string) {
+    try {
+      const data = await authApi.fetchJson<Assessment>('/candidate/assessment', 'GET', undefined, 'candidate');
+      const sanitized = sanitizeAssessmentQuestions(data);
+      const idx = this.state.assessments.findIndex(a => a.id === sanitized.id || a.id === assessmentId);
+      if (idx >= 0) this.state.assessments[idx] = sanitized;
+      else this.state.assessments.unshift(sanitized);
+      this.state.activeAssessmentId = sanitized.id;
+      this.notify();
+    } catch {
+      // Offline / API miss: still strip keys from any local copy before the exam UI runs.
+      this.state.assessments = this.state.assessments.map(a =>
+        a.id === assessmentId || a.id === this.state.activeAssessmentId
+          ? sanitizeAssessmentQuestions(a)
+          : a,
+      );
+      this.notify();
+    }
   }
 
   public updateSettings(newSettings: Partial<SystemSettings>) {
@@ -241,7 +269,12 @@ class Store {
   }
 
   public getActiveAssessment(): Assessment | undefined {
-    return this.state.assessments.find(a => a.id === this.state.activeAssessmentId);
+    const a = this.state.assessments.find(a => a.id === this.state.activeAssessmentId);
+    // Never expose answer keys on the candidate exam path.
+    if (a && this.state.otpVerified && !this.state.isStaffAuthenticated) {
+      return sanitizeAssessmentQuestions(a);
+    }
+    return a;
   }
 
   public setAnswer(questionId: string, answer: any, shouldNotify: boolean = true) {
@@ -296,16 +329,12 @@ class Store {
   public submitAssessment() {
     this.state.examStarted = false;
     this.state.examCompleted = true;
-    
-    // Stop camera and mic tracks immediately!
-    this.stopAllMediaStreams();
 
-    // Exit fullscreen immediately!
+    this.stopAllMediaStreams();
     if (document.fullscreenElement) {
       document.exitFullscreen().catch(() => {});
     }
 
-    // Auto calculate result for Recruiter view (Candidate will NEVER see this!)
     const activeCandId = this.state.activeCandidateId || 'cand-3';
     const cand = this.state.candidates.find(c => c.id === activeCandId);
     if (cand) {
@@ -313,39 +342,28 @@ class Store {
       cand.assessmentCompleted = true;
     }
 
-    const newResult: CandidateResult = {
-      id: `res-${Date.now()}`,
-      candidateId: activeCandId,
-      assessmentId: this.state.activeAssessmentId,
-      completedAt: new Date().toISOString(),
-      totalScore: 62,
-      maxScore: 75,
-      percentage: 82.6,
-      passStatus: 'Pass',
-      sectionScores: {
-        'Technical MCQs & Aptitude': { score: 10, maxScore: 10, percentage: 100 },
-        'Database & SQL Engineering': { score: 18, maxScore: 20, percentage: 90 },
-        'Algorithmic Coding Challenge': { score: 20, maxScore: 25, percentage: 80 },
-        'Architectural Essay': { score: 14, maxScore: 20, percentage: 70 }
-      },
-      aiConfidenceScore: 92.0,
-      totalViolations: this.state.violationCount,
-      proctoringLogs: [...this.state.proctoringLogs],
-      recruiterNotes: 'Automated evaluation completed cleanly. High algorithmic proficiency.',
-      recruiterDecision: 'Under Review'
-    };
+    // Server grades objective items; candidate UI never receives scores/keys.
+    void authApi.fetchJson('/candidate/submit', 'POST', {
+      answers: this.state.candidateAnswers,
+    }, 'candidate').catch(() => null);
 
-    this.state.candidateResults[activeCandId] = newResult;
     this.notify();
   }
 
-  public saveCandidateFeedback(rating: number, feedbackText: string, tags: string[]) {
+  public async saveCandidateFeedback(rating: number, feedbackText: string) {
+    await authApi.fetchJson('/candidate/feedback', 'POST', {
+      rating,
+      comment: feedbackText,
+    }, 'candidate');
     this.state.candidateFeedback = {
       rating,
       feedbackText,
-      tags,
+      tags: [],
       submittedAt: new Date().toISOString()
     };
+    const { candidateAssist } = await import('./candidateAssist');
+    candidateAssist.reportFinished();
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => undefined);
     this.notify();
   }
 
@@ -362,6 +380,7 @@ class Store {
 
     this.state.proctoringLogs.unshift(violation);
     this.state.liveProctoringAlert = `${type}: ${description}`;
+    import('./candidateAssist').then(mod => mod.candidateAssist.reportViolation(type, severity)).catch(() => undefined);
 
     const activeEntry = this.state.liveCandidates.find(c => c.candidateId === this.state.activeCandidateId);
     if (activeEntry) {
@@ -387,21 +406,28 @@ class Store {
     }
   }
 
-  public registerCandidateIdentity(candidateId: string, livePhotoUrl: string, idProofUrl: string) {
+  public registerCandidateIdentity(
+    candidateId: string,
+    livePhotoUrl: string,
+    idProofUrl: string,
+    details?: { name?: string; email?: string },
+  ) {
     const cand = this.state.candidates.find(c => c.id === candidateId);
     if (cand) {
-      cand.livePhotoUrl = livePhotoUrl;
-      cand.idProofUrl = idProofUrl;
+      if (livePhotoUrl) cand.livePhotoUrl = livePhotoUrl;
+      if (idProofUrl) cand.idProofUrl = idProofUrl;
+      if (details?.name) cand.name = details.name;
+      if (details?.email) cand.email = details.email;
       cand.identityStatus = 'pending_verification';
     } else {
       this.state.candidates.unshift({
         id: candidateId,
-        name: 'Active Candidate',
-        email: 'candidate@nexus.ai',
-        phone: '+1 555-0192',
-        experienceYears: 4,
-        skills: ['Python', 'SQL', 'TypeScript'],
-        status: 'Screened',
+        name: details?.name || 'Candidate',
+        email: details?.email || '',
+        phone: '',
+        experienceYears: 0,
+        skills: [],
+        status: 'Assessment Sent',
         assessmentId: this.state.activeAssessmentId,
         invitedAt: new Date().toLocaleDateString(),
         otpVerified: true,
@@ -412,7 +438,8 @@ class Store {
         identityStatus: 'pending_verification'
       });
     }
-    this.notify();
+    this.state.activeCandidateId = candidateId;
+    // Do not notify here. A full re-render would wipe the system-check screen while the photo is being saved.
   }
 
   public approveCandidateIdentity(candidateId: string) {

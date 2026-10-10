@@ -27,7 +27,9 @@ export class NavbarComponent {
     const route = currentRoute();
     const user = state.currentUser;
     const currentTheme = state.theme || 'dark';
-    const isExplicitCandidateLink = new URLSearchParams(window.location.search).has('assessment');
+    const examParams = new URLSearchParams(window.location.search);
+    const onExamLink = examParams.has('invite') || examParams.has('assessment');
+    const isExplicitCandidateLink = examParams.has('assessment') || examParams.has('invite');
     const inCandidateSession = state.otpVerified || state.examStarted;
 
     // Signed-in staff already see their portal in the sidebar, so the badge is not repeated here.
@@ -47,7 +49,7 @@ export class NavbarComponent {
       <header class="glass-panel border-b border-slate-800/80 sticky top-0 z-50 px-4 lg:px-8 py-3 transition-all">
         <div class="${staffSignedIn ? '' : 'max-w-7xl mx-auto '}flex items-center justify-between">
           <!-- Logo & Platform Identity -->
-          <div class="flex items-center gap-3 cursor-pointer" id="brand-logo-btn">
+          <div class="flex items-center gap-3 ${onExamLink ? '' : 'cursor-pointer'}" id="brand-logo-btn">
             <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-blue-600 via-indigo-500 to-purple-600 flex items-center justify-center shadow-lg shadow-blue-500/20">
               <span class="text-xl font-black text-white tracking-wider">N</span>
             </div>
@@ -71,7 +73,7 @@ export class NavbarComponent {
 
             ${staffSignedIn ? this.staffControlsHtml() : ''}
 
-            ${route.kind === 'candidate' && !inCandidateSession ? this.staffMenuHtml(menuPortals, state.isStaffAuthenticated) : ''}
+            ${route.kind === 'candidate' && !onExamLink && !inCandidateSession ? this.staffMenuHtml(menuPortals, state.isStaffAuthenticated) : ''}
 
             <!-- Global Proctoring Indicator Status Badge -->
             ${state.examStarted ? `
@@ -134,6 +136,8 @@ export class NavbarComponent {
     const q = (sel: string) => this.container.querySelector(sel);
 
     q('#brand-logo-btn')?.addEventListener('click', () => {
+      const params = new URLSearchParams(window.location.search);
+      if (params.has('invite') || params.has('assessment')) return;
       NavbarComponent.menuOpen = false;
       const route = currentRoute();
       if (route.kind === 'staff' && store.getState().isStaffAuthenticated) {

@@ -4,6 +4,7 @@ __pycache__/
 .venv/
 .pytest_cache/
 *.db
+backend/storage/
 
 # --- secrets: never commit these -------------------------------------------------
 .env

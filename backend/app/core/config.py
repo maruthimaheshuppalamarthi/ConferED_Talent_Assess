@@ -96,7 +96,7 @@ class Settings:
     # CORS - must be explicit origins because we use credentialed requests
     CORS_ORIGINS: list = _list(
         "CORS_ORIGINS",
-        "http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173",
+        "http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001,http://localhost:5173,http://127.0.0.1:5173",
     )
     FRONTEND_URL: str = os.getenv("FRONTEND_URL", "http://localhost:3000")
     # Host names this API answers to (Host header). Empty = any (development). Set it in production.
@@ -117,6 +117,10 @@ class Settings:
 
     # Auth database (SQLite for local tests; Supabase Postgres via AUTH_DATABASE_URL)
     AUTH_DATABASE_URL: str = os.getenv("AUTH_DATABASE_URL", "sqlite:///./nexus_auth_dev.db")
+    # Supabase Storage for candidate photos and government IDs. Empty = keep files on this machine.
+    SUPABASE_URL: str = os.getenv("SUPABASE_URL", "").rstrip("/")
+    SUPABASE_SERVICE_ROLE_KEY: str = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+    SUPABASE_IDENTITY_BUCKET: str = os.getenv("SUPABASE_IDENTITY_BUCKET", "identity")
 
     # Email gateway bootstrap values. The System Admin can override them in Settings > Email (stored encrypted).
     GMAIL_SENDER_EMAIL: str = os.getenv("GMAIL_SENDER_EMAIL", "")
@@ -124,9 +128,12 @@ class Settings:
     SMTP_HOST: str = os.getenv("SMTP_HOST", "smtp.gmail.com")
     SMTP_PORT: int = int(os.getenv("SMTP_PORT", "587"))
 
-    # Database & Redis
+    # Database & Redis / Celery
     DATABASE_URL: str = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/nexus_assess")
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    # Empty CELERY_BROKER_URL = run invite dispatch synchronously (local/dev without Redis).
+    CELERY_BROKER_URL: str = os.getenv("CELERY_BROKER_URL", "")
+    BULK_INVITE_MAX_ROWS: int = int(os.getenv("BULK_INVITE_MAX_ROWS", "5000"))
 
     # Code Sandbox Limits
     MAX_EXECUTION_TIME_SECONDS: int = 5
