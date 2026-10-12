@@ -172,7 +172,14 @@ SENT = []
 @pytest.fixture(scope="module", autouse=True)
 def _capture_email():
     mp = pytest.MonkeyPatch()
-    mp.setattr(email_service, "send_email", lambda to, subject, body, **k: SENT.append((to, subject, body)) or True)
+
+    def capture(to, subject, body, **k):
+        SENT.append((to, subject, body))
+        return True
+
+    mp.setattr(email_service, "send_email", capture)
+    # Login OTPs use dispatch_otp_email, which skips SMTP when DEV_EXPOSE_OTP is on.
+    mp.setattr(email_service, "dispatch_otp_email", lambda to, subject, body: SENT.append((to, subject, body)))
     yield
     mp.undo()
 

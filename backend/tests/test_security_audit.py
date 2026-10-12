@@ -133,10 +133,13 @@ def test_unknown_email_is_in_login_history_but_not_in_the_immutable_audit_log(cl
 
 
 def test_wrong_portal_is_recorded_with_the_real_reason(client, admin):
+    # Login looks up (email, role). A Recruiter is unknown on the admin portal — same
+    # generic 401, recorded in login history only (no staff audit row for another role).
     user, temp = create_staff(client, admin, "Recruiter", "portal")
     assert start_login(client, "admin", user["email"], temp).status_code == 401
-    entry = audit_rows(action="auth.login_failed", actor_email=user["email"])[0]
-    assert entry.details["reason"] == "wrong_portal"
+    event = login_rows(email=user["email"])[-1]
+    assert event.user_id is None and event.failure_reason == "unknown_account" and event.portal == "admin"
+    assert audit_rows(action="auth.login_failed", actor_email=user["email"]) == []
 
 
 def test_lockout_is_audited_and_blocked_attempts_are_logged(client, admin):
