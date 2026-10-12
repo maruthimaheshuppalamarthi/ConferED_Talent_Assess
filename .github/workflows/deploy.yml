@@ -5,17 +5,119 @@ on:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+  actions: write
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'ap-south-1' }}
+
 jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  build-push-api:
+    name: build-push-api
+    needs: test
+    if: ${{ vars.ECR_REPOSITORY != '' }}
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read VERSION
+        id: version
+        run: echo "value=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS (GitHub OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push API image
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          file: backend/Dockerfile
+          push: true
+          tags: |
+            ${{ vars.ECR_REPOSITORY }}:${{ github.sha }}
+            ${{ vars.ECR_REPOSITORY }}:${{ steps.version.outputs.value }}
+            ${{ vars.ECR_REPOSITORY }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   deploy:
+    name: deploy
+    needs: [test, build-push-api]
+    if: always() && needs.test.result == 'success' && (needs.build-push-api.result == 'success' || needs.build-push-api.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        working-directory: frontend
+        env:
+          VITE_API_URL: https://confered-assess.duckdns.org
+        run: |
+          npm ci
+          npm run build
+
+      - name: Copy frontend dist to EC2
+        uses: appleboy/scp-action@v1.0.0
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          source: "frontend/dist/*"
+          target: "/home/ubuntu/confered-web-dist"
+          strip_components: 2
+          rm: true
+
+      - name: ECR password for the server
+        if: ${{ vars.ECR_REPOSITORY != '' && needs.build-push-api.result == 'success' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Export ECR login password
+        if: ${{ vars.ECR_REPOSITORY != '' && needs.build-push-api.result == 'success' }}
+        run: |
+          pw="$(aws ecr get-login-password --region "$AWS_REGION")"
+          echo "::add-mask::$pw"
+          echo "ECR_PASSWORD=$pw" >> "$GITHUB_ENV"
+
       - name: Deploy to EC2 over SSH
         uses: appleboy/ssh-action@v1.2.2
+        env:
+          IMAGE_TAG: ${{ needs.build-push-api.result == 'success' && github.sha || '' }}
+          ECR_REPOSITORY: ${{ needs.build-push-api.result == 'success' && vars.ECR_REPOSITORY || '' }}
+          ECR_PASSWORD: ${{ env.ECR_PASSWORD }}
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           command_timeout: 20m
+          envs: IMAGE_TAG,ECR_REPOSITORY,ECR_PASSWORD
           script: |
             set -euo pipefail
             cd /home/ubuntu/ConferED_Talent_Assess
