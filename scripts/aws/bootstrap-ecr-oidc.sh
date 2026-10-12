@@ -10,6 +10,8 @@ set -euo pipefail
 
 AWS_REGION="${AWS_REGION:-ap-south-1}"
 GITHUB_REPO="${GITHUB_REPO:-maruthimaheshuppalamarthi/ConferED_Talent_Assess}"
+# GitHub immutable OIDC sub: repo:owner@id/name@id — not repo:owner/name
+GITHUB_OIDC_SUB="${GITHUB_OIDC_SUB:-repo:maruthimaheshuppalamarthi@120779125/ConferED_Talent_Assess@1410502235:*}"
 ECR_NAME="${ECR_NAME:-confered-api}"
 GHA_ROLE_NAME="${GHA_ROLE_NAME:-ConferedGitHubActionsECR}"
 EC2_ROLE_NAME="${EC2_ROLE_NAME:-ConferedEC2ECRPull}"
@@ -70,13 +72,13 @@ cat > "${TRUST_GHA}" <<EOF
     {
       "Effect": "Allow",
       "Principal": { "Federated": "${OIDC_ARN}" },
-      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Action": ["sts:AssumeRoleWithWebIdentity", "sts:TagSession"],
       "Condition": {
         "StringEquals": {
           "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
         },
         "StringLike": {
-          "token.actions.githubusercontent.com:sub": "repo:${GITHUB_REPO}:*"
+          "token.actions.githubusercontent.com:sub": "${GITHUB_OIDC_SUB}"
         }
       }
     }
