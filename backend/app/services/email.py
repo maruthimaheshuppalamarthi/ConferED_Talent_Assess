@@ -2,12 +2,14 @@ import logging
 import smtplib
 import socket
 import ssl
+import threading
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formataddr
 from html import escape
 from typing import Optional, Tuple
 
+from app.core.config import settings
 from app.services import runtime_settings as rt
 
 logger = logging.getLogger("nexus.email")
@@ -111,6 +113,25 @@ def send_email(to_email: str, subject: str, body_html: str,
                host: Optional[str] = None, port: Optional[int] = None) -> bool:
     """Fire-and-forget variant: True on success, False on any failure. Never raises."""
     return send_email_detailed(to_email, subject, body_html, sender_email, app_password, host, port)[0]
+
+
+def dispatch_otp_email(to_email: str, subject: str, body_html: str) -> None:
+    """
+    Queue a login OTP email without blocking the request worker.
+
+    Starlette BackgroundTasks run SMTP on the same worker after the handler, which stalls every
+    later sign-in while Gmail connects. When DEV_EXPOSE_OTP is on the code is already in the API
+    response, so SMTP is skipped; otherwise it runs on a daemon thread.
+    """
+    if settings.DEV_EXPOSE_OTP:
+        logger.info("DEV_EXPOSE_OTP: skipping SMTP OTP email to %s", to_email)
+        return
+    threading.Thread(
+        target=send_email,
+        args=(to_email, subject, body_html),
+        daemon=True,
+        name="otp-smtp",
+    ).start()
 
 # ----------------------------------------------------------------- templates
 def _shell(title: str, inner: str) -> str:

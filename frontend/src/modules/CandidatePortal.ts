@@ -1,14 +1,25 @@
+import { BRAND } from '../brand';
 import { MonacoEditorComponent } from '../components/MonacoEditorComponent';
-import { ProctoringOverlayComponent } from '../components/ProctoringOverlay';
+import { ensureProctoringOverlay, teardownProctoringOverlay } from '../components/ProctoringOverlay';
 import { SystemCheckComponent } from '../components/SystemCheck';
+import { PORTAL_INFO, router } from '../router';
 import { authApi, ApiError } from '../services/authApi';
 import { store } from '../services/store';
+import { Portal } from '../types';
+
+function formatExamClock(totalSeconds: number): string {
+  const safe = Math.max(0, Math.floor(totalSeconds));
+  const hours = Math.floor(safe / 3600);
+  const minutes = Math.floor((safe % 3600) / 60);
+  const seconds = safe % 60;
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+}
 
 export class CandidatePortalModule {
   private container: HTMLElement;
-  private timerInterval: any = null;
   private selectedRating: number = 0;
   private feedbackDraft = '';
+  private static clockId = 0;
 
   constructor(container: HTMLElement) {
     this.container = container;
@@ -62,9 +73,16 @@ export class CandidatePortalModule {
       if (!document.fullscreenElement) {
         blocker.classList.remove('hidden');
         if (CandidatePortalModule.wasFullscreen) {
-          if (title) title.textContent = 'Fullscreen Lockdown Violation';
-          if (copy) copy.textContent = 'You left fullscreen. That is a proctoring violation. Return to fullscreen to continue.';
           store.logProctoringViolation('Fullscreen Exit', 'Candidate left fullscreen lockdown', 'high');
+          const next = store.getState();
+          const used = next.violationCount;
+          const max = next.settings.maxViolationsBeforeTerminate;
+          if (title) title.textContent = used >= max ? 'Exam closing' : `Fullscreen warning ${used} of ${max}`;
+          if (copy) {
+            copy.textContent = used >= max
+              ? 'You left fullscreen too many times. The exam window is closing automatically.'
+              : `Leaving fullscreen is a warning. After ${max} warnings the exam closes automatically. Return to fullscreen to continue.`;
+          }
         } else if (title && copy) {
           title.textContent = 'Fullscreen required';
           copy.textContent = 'Enter fullscreen to continue the assessment.';
@@ -81,21 +99,89 @@ export class CandidatePortalModule {
 
   public render() {
     const state = store.getState();
+    if (!state.examStarted || state.examCompleted) {
+      document.getElementById('fullscreen-enforcer-overlay')?.classList.add('hidden');
+      CandidatePortalModule.stopExamClock();
+    }
 
     // Candidate Flow Router
     if (!state.otpVerified) {
+      teardownProctoringOverlay();
       this.renderOtpVerification();
     } else if (!state.systemCheckCompleted) {
+      teardownProctoringOverlay();
       const systemCheck = new SystemCheckComponent(this.container);
       systemCheck.render().catch((e) => console.error('System check failed to render', e));
     } else if (state.examStarted && !state.examCompleted) {
+      ensureProctoringOverlay();
       this.renderExamEngine();
-      this.startTimer();
+      CandidatePortalModule.ensureExamClock();
     } else if (state.examCompleted) {
+      teardownProctoringOverlay();
       this.renderCompletionScreen();
     } else {
+      teardownProctoringOverlay();
       this.renderInstructionsScreen();
+      if (!state.assessmentReady && state.activeCandidateId) {
+        void store.loadCandidateAssessment(state.activeAssessmentId);
+      }
     }
+  }
+
+  private renderLanding() {
+    const portals: Portal[] = ['admin', 'recruiter', 'proctor'];
+    this.container.innerHTML = `
+      <section class="bg-white">
+        <div class="max-w-7xl mx-auto px-6 lg:px-10 py-16 lg:py-20 grid lg:grid-cols-2 gap-14 lg:gap-20 items-start">
+          <div class="space-y-5 lg:pt-4">
+            <p class="text-[13px] font-semibold tracking-[0.14em] uppercase text-slate-500">
+              ConferED Talent Assess
+            </p>
+            <h1 class="text-4xl sm:text-5xl font-extrabold tracking-tight leading-[1.15]" style="color:${BRAND.navy}">
+              Sign in to run assessments, hiring, and live proctoring.
+            </h1>
+            <p class="text-base sm:text-lg leading-relaxed text-slate-600 max-w-xl">
+              This is the staff workspace for <strong style="color:${BRAND.navy}">System Admin</strong>,
+              <strong style="color:${BRAND.navy}">Recruiter / HR</strong>, and
+              <strong style="color:${BRAND.navy}">Proctors</strong>.
+              Build exams, send invitations, and monitor live sessions.
+            </p>
+            <p class="text-sm leading-relaxed text-slate-500 max-w-xl">
+              Candidates do not sign in here. They only open the personal invitation link sent to their email.
+            </p>
+          </div>
+
+          <div class="rounded-2xl border border-slate-200 bg-white p-7 space-y-5 shadow-sm">
+            <div>
+              <p class="text-[11px] font-bold tracking-[0.16em] uppercase text-slate-500">Staff portals</p>
+              <h2 class="text-2xl font-extrabold tracking-tight mt-1" style="color:${BRAND.navy}">Choose your workspace</h2>
+              <p class="text-sm mt-2 text-slate-600">Sign in with the account your System Admin created for you.</p>
+            </div>
+            <div class="space-y-2.5">
+              ${portals.map(p => {
+                const info = PORTAL_INFO[p];
+                return `
+                  <button type="button" data-portal="${p}" class="w-full text-left rounded-xl border border-slate-200 hover:border-slate-400 hover:bg-slate-50 transition-all px-4 py-3.5 flex items-start gap-3 bg-white">
+                    <span class="text-xl leading-none mt-0.5">${info.icon}</span>
+                    <span class="min-w-0 flex-1">
+                      <span class="block text-sm font-bold" style="color:${BRAND.navy}">${info.title}</span>
+                      <span class="block text-xs text-slate-500 mt-0.5">${info.blurb}</span>
+                    </span>
+                    <span class="shrink-0 text-xs font-semibold mt-1" style="color:${BRAND.navy}">Sign in →</span>
+                  </button>
+                `;
+              }).join('')}
+            </div>
+          </div>
+        </div>
+      </section>
+    `;
+    this.container.querySelectorAll('[data-portal]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const portal = (btn as HTMLElement).getAttribute('data-portal') as Portal;
+        if (portal) router.navigate(PORTAL_INFO[portal].path);
+      });
+    });
   }
 
   private renderOtpVerification() {
@@ -103,18 +189,7 @@ export class CandidatePortalModule {
 
     // The exam can only be opened from the personal invitation link (it carries a signed-by-server token).
     if (!inviteToken) {
-      this.container.innerHTML = `
-        <div class="max-w-md mx-auto py-16 px-4">
-          <div class="glass-panel p-8 rounded-3xl border border-slate-800 shadow-2xl text-center space-y-4">
-            <div class="w-16 h-16 rounded-2xl bg-amber-500/10 text-amber-400 border border-amber-500/20 mx-auto flex items-center justify-center text-2xl">🔗</div>
-            <h2 class="text-2xl font-extrabold text-white tracking-tight">Invitation Link Required</h2>
-            <p class="text-xs text-slate-400 leading-relaxed">
-              This assessment can only be started from your personal invitation link. Open the email you received from the
-              recruiter and click <strong class="text-slate-200">Begin Online Assessment</strong>.
-            </p>
-          </div>
-        </div>
-      `;
+      this.renderLanding();
       return;
     }
 
@@ -207,40 +282,68 @@ export class CandidatePortalModule {
   }
 
   private renderInstructionsScreen() {
+    const state = store.getState();
     const assessment = store.getActiveAssessment();
+    const cand = state.candidates.find(c => c.id === state.activeCandidateId);
+    const waitingForProctor = state.systemCheckCompleted && cand?.identityStatus !== 'approved';
+    if (!state.assessmentReady) {
+      this.container.innerHTML = `
+        <div class="max-w-md mx-auto py-16 px-4 text-center space-y-3">
+          <p class="text-sm font-bold text-white">Loading your exam paper…</p>
+          <p class="text-xs text-slate-400">Fetching sections and questions for this invitation.</p>
+          <button id="retry-paper-btn" class="mt-4 px-4 py-2 rounded-xl bg-slate-800 text-slate-200 text-xs font-bold border border-slate-700">Retry</button>
+        </div>
+      `;
+      this.container.querySelector('#retry-paper-btn')?.addEventListener('click', () => {
+        void store.loadCandidateAssessment(state.activeAssessmentId);
+      });
+      return;
+    }
 
+    const sections = assessment?.sections || [];
     this.container.innerHTML = `
       <div class="max-w-4xl mx-auto py-10 px-4">
         <div class="glass-panel p-8 rounded-3xl border border-slate-800 space-y-6 shadow-2xl">
+          ${waitingForProctor ? `
+            <div class="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs font-semibold">
+              Identity is with the proctor. Stay on this screen. Your exam sections are ready below and will open after you are admitted.
+            </div>
+          ` : ''}
           <div class="flex items-center justify-between border-b border-slate-800 pb-5">
             <div>
               <span class="px-3 py-1 text-xs font-bold uppercase tracking-wider bg-blue-500/10 text-blue-400 rounded-full border border-blue-500/20">Assessment Overview</span>
               <h1 class="text-2xl font-extrabold text-white mt-2">${assessment?.title || 'Technical Assessment'}</h1>
-              <p class="text-xs text-slate-400 mt-1">${assessment?.description}</p>
+              <p class="text-xs text-slate-400 mt-1">${assessment?.description || ''}</p>
             </div>
             <div class="text-right">
-              <div class="text-2xl font-extrabold font-mono text-blue-400">${assessment?.totalDurationMinutes} Mins</div>
+              <div class="text-2xl font-extrabold font-mono text-blue-400">${assessment?.totalDurationMinutes || 0} Mins</div>
               <span class="text-xs text-slate-400 font-medium">Total Duration</span>
             </div>
           </div>
 
-          <!-- Section Breakdown Cards (NO MARKS DISPLAYED) -->
           <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            ${(assessment?.sections || []).map((sec, idx) => `
+            ${sections.map((sec, idx) => `
               <div class="p-4 rounded-2xl bg-slate-900/80 border border-slate-800 space-y-1">
                 <span class="text-[10px] font-bold uppercase tracking-wider text-slate-500">Section ${idx + 1}</span>
                 <h3 class="text-xs font-bold text-white truncate">${sec.name}</h3>
-                <div class="text-xs font-mono text-blue-400 font-semibold">${sec.timeLimitMinutes} Mins • ${sec.questions.length} Questions</div>
+                <div class="text-xs font-mono text-blue-400 font-semibold">${sec.timeLimitMinutes || 0} Mins • ${(sec.questions || []).length} Questions</div>
               </div>
-            `).join('')}
+            `).join('') || '<p class="text-xs text-slate-500 col-span-full">No sections are on this paper yet. Ask the recruiter to assign questions in Assessment Builder.</p>'}
           </div>
 
-          <div class="pt-4 border-t border-slate-800 flex justify-end">
-            <button id="goto-syscheck-btn" class="py-3.5 px-8 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-sm tracking-wide shadow-lg shadow-blue-600/30 transition-all flex items-center gap-2">
-              <span>PROCEED TO SYSTEM DIAGNOSTICS</span>
-              <span>➔</span>
-            </button>
-          </div>
+          ${waitingForProctor ? `
+            <div class="pt-4 border-t border-slate-800 flex items-center gap-3 text-xs text-slate-400">
+              <span class="inline-block w-2.5 h-2.5 rounded-full bg-amber-500 animate-ping"></span>
+              <span>Waiting for proctor authorization…</span>
+            </div>
+          ` : `
+            <div class="pt-4 border-t border-slate-800 flex justify-end">
+              <button id="goto-syscheck-btn" class="py-3.5 px-8 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-sm tracking-wide shadow-lg shadow-blue-600/30 transition-all flex items-center gap-2">
+                <span>PROCEED TO SYSTEM DIAGNOSTICS</span>
+                <span>➔</span>
+              </button>
+            </div>
+          `}
         </div>
       </div>
     `;
@@ -257,15 +360,61 @@ export class CandidatePortalModule {
   private renderExamEngine() {
     const state = store.getState();
     const assessment = store.getActiveAssessment();
-    if (!assessment) return;
+    if (!state.assessmentReady || !assessment) {
+      this.container.innerHTML = `
+        <div class="py-24 text-center space-y-3">
+          <p class="text-sm font-bold text-white">Loading your assessment…</p>
+          <p class="text-xs text-slate-400">Keep your camera in view. The exam paper will appear in a moment.</p>
+          <button id="retry-exam-paper-btn" class="px-4 py-2 rounded-xl bg-slate-800 text-slate-200 text-xs font-bold border border-slate-700">Reload paper</button>
+        </div>
+      `;
+      this.container.querySelector('#retry-exam-paper-btn')?.addEventListener('click', () => {
+        void store.loadCandidateAssessment(state.activeAssessmentId);
+      });
+      return;
+    }
 
-    const currentSection = assessment.sections[state.currentSectionIndex];
-    const currentQuestion = currentSection?.questions[state.currentQuestionIndex];
-    if (!currentSection || !currentQuestion) return;
+    const sections = assessment.sections || [];
+    let sectionIndex = state.currentSectionIndex;
+    if (sectionIndex < 0 || sectionIndex >= sections.length) sectionIndex = 0;
+    let currentSection = sections[sectionIndex];
+    if (currentSection && !(currentSection.questions || []).length) {
+      const filled = sections.findIndex(sec => (sec.questions || []).length > 0);
+      if (filled >= 0) {
+        sectionIndex = filled;
+        currentSection = sections[filled];
+        state.currentSectionIndex = filled;
+        state.currentQuestionIndex = 0;
+      }
+    }
+    const questions = currentSection?.questions || [];
+    const currentQuestion = questions[state.currentQuestionIndex] || questions[0];
+    if (!currentSection || !currentQuestion) {
+      this.container.innerHTML = `
+        <div class="max-w-2xl mx-auto py-16 px-4 space-y-4">
+          <h2 class="text-lg font-extrabold text-white">${assessment.title || 'Assessment'}</h2>
+          <p class="text-sm text-slate-300">This exam has no questions yet. Reload the paper if the recruiter just assigned questions.</p>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            ${sections.map((sec, idx) => `
+              <div class="p-4 rounded-2xl bg-slate-900 border border-slate-800">
+                <p class="text-[10px] font-bold uppercase text-slate-500">Section ${idx + 1}</p>
+                <p class="text-sm font-bold text-white">${sec.name}</p>
+                <p class="text-xs text-slate-400">${sec.timeLimitMinutes || 0} mins • ${(sec.questions || []).length} questions</p>
+              </div>
+            `).join('')}
+          </div>
+          <button id="retry-empty-paper-btn" class="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold">Reload paper</button>
+        </div>
+      `;
+      this.container.querySelector('#retry-empty-paper-btn')?.addEventListener('click', () => {
+        void store.loadCandidateAssessment(state.activeAssessmentId);
+      });
+      return;
+    }
 
-    const mins = Math.floor(state.sectionTimeRemainingSeconds / 60);
-    const secs = state.sectionTimeRemainingSeconds % 60;
-    const timerStr = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+    const remaining = store.getSectionRemainingSeconds();
+    const timerStr = formatExamClock(remaining);
+    const urgent = remaining < 120;
 
     this.container.innerHTML = `
       <div class="min-h-[calc(100vh-65px)] flex flex-col bg-slate-950">
@@ -274,9 +423,20 @@ export class CandidatePortalModule {
           <div class="flex items-center gap-4">
             <div>
               <span class="text-[10px] font-bold uppercase tracking-wider text-blue-400">
-                SECTION ${state.currentSectionIndex + 1} OF ${assessment.sections.length}
+                SECTION ${sectionIndex + 1} OF ${sections.length}
               </span>
               <h2 class="text-sm font-bold text-white">${currentSection.name}</h2>
+              <div class="flex flex-wrap gap-1.5 mt-2">
+                ${sections.map((sec, idx) => `
+                  <span class="px-2 py-0.5 rounded-md text-[10px] font-bold border ${
+                    idx === sectionIndex
+                      ? 'bg-blue-600/20 text-blue-300 border-blue-500/40'
+                      : idx < sectionIndex
+                        ? 'bg-slate-800 text-slate-500 border-slate-700'
+                        : 'bg-slate-900 text-slate-400 border-slate-800'
+                  }">${idx + 1}. ${sec.name} · ${(sec.questions || []).length}q</span>
+                `).join('')}
+              </div>
             </div>
           </div>
 
@@ -284,7 +444,7 @@ export class CandidatePortalModule {
           <div class="flex items-center gap-6">
             <div class="flex items-center gap-2 bg-slate-900 border border-slate-800 px-3.5 py-1.5 rounded-xl font-mono">
               <span class="text-xs text-slate-400 uppercase tracking-wider">Section Time:</span>
-              <span class="text-base font-extrabold ${mins < 2 ? 'text-red-400 animate-pulse' : 'text-blue-400'}">${timerStr}</span>
+              <span id="exam-section-timer" class="text-base font-extrabold tabular-nums ${urgent ? 'text-red-400 animate-pulse' : 'text-blue-400'}">${timerStr}</span>
             </div>
 
             <button id="finish-sec-btn" class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold border border-slate-700 transition-all">
@@ -387,8 +547,6 @@ export class CandidatePortalModule {
           </div>
         </div>
 
-        <!-- Floating Live Proctoring Webcam PIP -->
-        <div id="proctoring-pip-container"></div>
       </div>
     `;
 
@@ -399,13 +557,6 @@ export class CandidatePortalModule {
         const editorComp = new MonacoEditorComponent(monacoHost, currentQuestion);
         editorComp.render();
       }
-    }
-
-    // Render Live Proctoring Overlay
-    const proctorHost = this.container.querySelector('#proctoring-pip-container') as HTMLElement;
-    if (proctorHost) {
-      const proctorComp = new ProctoringOverlayComponent(proctorHost);
-      proctorComp.render();
     }
 
     this.attachExamEvents(currentQuestion);
@@ -599,29 +750,33 @@ export class CandidatePortalModule {
     });
   }
 
-  private startTimer() {
-    if (this.timerInterval) clearInterval(this.timerInterval);
+  private static stopExamClock() {
+    if (CandidatePortalModule.clockId) {
+      window.clearInterval(CandidatePortalModule.clockId);
+      CandidatePortalModule.clockId = 0;
+    }
+  }
 
-    this.timerInterval = setInterval(() => {
+  private static ensureExamClock() {
+    if (CandidatePortalModule.clockId) return;
+    CandidatePortalModule.clockId = window.setInterval(() => {
       const state = store.getState();
       if (!state.examStarted || state.examCompleted) {
-        clearInterval(this.timerInterval);
+        CandidatePortalModule.stopExamClock();
         return;
       }
-
-      if (state.sectionTimeRemainingSeconds > 0) {
-        state.sectionTimeRemainingSeconds--;
-        const mins = Math.floor(state.sectionTimeRemainingSeconds / 60);
-        const secs = state.sectionTimeRemainingSeconds % 60;
-        const timerStr = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
-        
-        const timerEl = this.container.querySelector('.font-extrabold.text-blue-400');
-        if (timerEl) timerEl.textContent = timerStr;
-      } else {
-        store.nextSection();
-        this.render();
+      const remaining = store.getSectionRemainingSeconds();
+      const timerEl = document.getElementById('exam-section-timer');
+      if (timerEl) {
+        timerEl.textContent = formatExamClock(remaining);
+        timerEl.classList.toggle('text-red-400', remaining < 120);
+        timerEl.classList.toggle('animate-pulse', remaining < 120);
+        timerEl.classList.toggle('text-blue-400', remaining >= 120);
       }
-    }, 1000);
+      if (remaining <= 0) {
+        store.nextSection();
+      }
+    }, 250);
   }
 
   private renderCompletionScreen() {

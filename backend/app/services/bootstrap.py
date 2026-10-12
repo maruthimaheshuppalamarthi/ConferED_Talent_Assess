@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.default_settings import DEFAULT_SETTINGS
-from app.core.roles import LEGACY_ROLE_MAP, ROLE_SYSTEM_ADMIN
+from app.core.roles import LEGACY_ROLE_MAP, ROLE_PROCTOR, ROLE_RECRUITER, ROLE_SYSTEM_ADMIN
 from app.core.password_policy import is_weak_for_admin
 from app.core.security import generate_temp_password, hash_password, verify_password
 from app.db.session import SessionLocal, engine
@@ -14,7 +14,8 @@ from app.models.auth import AuthBase, StaffUser, SystemSetting, utcnow
 from app.services import audit
 from app.services import auth_core as core
 from app.services.question_bank import ensure_question_categories
-from app.services.recruiter_seed import seed_recruiter_demo
+from app.services.recruiter_pipeline import sync_all_job_exam_papers
+from app.services.recruiter_seed import ensure_demo_exam_paper, seed_recruiter_demo
 
 logger = logging.getLogger("nexus.bootstrap")
 
@@ -86,41 +87,81 @@ def seed_default_settings(db: Session) -> int:
 LEGACY_DEFAULT_ADMIN_PASSWORDS = ("970598",)
 
 
-def ensure_seed_admin(db: Session) -> Optional[str]:
+def _otp_destination(login_id: str) -> str:
+    # OTPs for a username-style login id go to the project mailbox (it isn't a real email).
+    if "." not in login_id.split("@")[-1]:
+        return (settings.GMAIL_SENDER_EMAIL or "").strip() or login_id
+    return login_id
+
+
+def _ensure_seed_staff(db: Session, *, email: str, password: str, name: str, role: str,
+                       generate_if_missing: bool) -> Optional[str]:
     """
-    Create the first System Admin when no account with SEED_ADMIN_EMAIL exists.
-    Returns the generated temporary password when SEED_ADMIN_PASSWORD was not configured (None otherwise).
-    A generated password is shown once in the server log and must be replaced at first sign-in; a password the
-    operator chose explicitly in SEED_ADMIN_PASSWORD is trusted as is.
+    Insert one staff row for this portal when that login id + role is missing.
+    Lookup is per role so the same username can exist on admin, recruiter and proctor.
+    Returns a generated temporary password, or None when the account already existed / was configured.
     """
-    email = settings.SEED_ADMIN_EMAIL.strip().lower()
-    if not email or db.query(StaffUser).filter(StaffUser.email == email).first():
+    email = (email or "").strip().lower()
+    if not email:
         return None
-    configured = settings.SEED_ADMIN_PASSWORD
-    password = configured or generate_temp_password()
+    if db.query(StaffUser).filter(StaffUser.email == email, StaffUser.role == role).first():
+        return None
+    configured = (password or "").strip()
+    if not configured and not generate_if_missing:
+        return None
+    chosen = configured or generate_temp_password()
     db.add(StaffUser(
         email=email,
-        # OTPs for the seeded account go to the project mailbox (its login id isn't a real email).
-        otp_email=settings.GMAIL_SENDER_EMAIL if "." not in email.split("@")[-1] else email,
-        full_name=settings.SEED_ADMIN_NAME,
-        role=ROLE_SYSTEM_ADMIN,
-        password_hash=hash_password(password),
+        otp_email=_otp_destination(email),
+        full_name=name,
+        role=role,
+        password_hash=hash_password(chosen),
         must_change_password=not configured,
         password_changed_at=utcnow(),
     ))
     db.commit()
-    audit.record_audit(db, category=audit.CAT_SYSTEM, action="system.admin_seeded",
-                       summary=f"Initial System Admin account {email} was created at startup",
-                       target_type="staff_user", details={"email": email, "temporaryPassword": not configured})
+    audit.record_audit(db, category=audit.CAT_SYSTEM, action="system.staff_seeded",
+                       summary=f"Seeded {role} account {email} was created at startup",
+                       target_type="staff_user", details={"email": email, "role": role,
+                                                          "temporaryPassword": not configured})
     if not configured:
         logger.warning("=" * 72)
-        logger.warning("Initial System Admin created:  %s", email)
-        logger.warning("Temporary password (shown only now):  %s", password)
+        logger.warning("Seeded %s created:  %s", role, email)
+        logger.warning("Temporary password (shown only now):  %s", chosen)
         logger.warning("You must choose your own password at first sign-in.")
         logger.warning("=" * 72)
-        return password
-    logger.warning("Seeded System Admin account '%s' from SEED_ADMIN_PASSWORD", email)
+        return chosen
+    logger.warning("Seeded %s account '%s' from configured seed password", role, email)
     return None
+
+
+def ensure_seed_admin(db: Session) -> Optional[str]:
+    """
+    Create the first System Admin when no account with SEED_ADMIN_EMAIL exists for that role.
+    Returns the generated temporary password when SEED_ADMIN_PASSWORD was not configured (None otherwise).
+    A generated password is shown once in the server log and must be replaced at first sign-in; a password the
+    operator chose explicitly in SEED_ADMIN_PASSWORD is trusted as is.
+    """
+    return _ensure_seed_staff(
+        db, email=settings.SEED_ADMIN_EMAIL, password=settings.SEED_ADMIN_PASSWORD,
+        name=settings.SEED_ADMIN_NAME, role=ROLE_SYSTEM_ADMIN, generate_if_missing=True,
+    )
+
+
+def ensure_seed_recruiter(db: Session) -> Optional[str]:
+    """Create the Recruiter seed account when SEED_RECRUITER_EMAIL and SEED_RECRUITER_PASSWORD are set."""
+    return _ensure_seed_staff(
+        db, email=settings.SEED_RECRUITER_EMAIL, password=settings.SEED_RECRUITER_PASSWORD,
+        name=settings.SEED_RECRUITER_NAME, role=ROLE_RECRUITER, generate_if_missing=False,
+    )
+
+
+def ensure_seed_proctor(db: Session) -> Optional[str]:
+    """Create the Proctor seed account when SEED_PROCTOR_EMAIL and SEED_PROCTOR_PASSWORD are set."""
+    return _ensure_seed_staff(
+        db, email=settings.SEED_PROCTOR_EMAIL, password=settings.SEED_PROCTOR_PASSWORD,
+        name=settings.SEED_PROCTOR_NAME, role=ROLE_PROCTOR, generate_if_missing=False,
+    )
 
 
 def enforce_admin_password_policy(db: Session) -> List[str]:
@@ -129,7 +170,8 @@ def enforce_admin_password_policy(db: Session) -> List[str]:
     default, or a weak SEED_ADMIN_PASSWORD). Returns the emails that were flagged.
     """
     email = settings.SEED_ADMIN_EMAIL.strip().lower()
-    user = db.query(StaffUser).filter(StaffUser.email == email, StaffUser.deleted_at.is_(None)).first() if email else None
+    user = (db.query(StaffUser).filter(StaffUser.email == email, StaffUser.role == ROLE_SYSTEM_ADMIN,
+                                       StaffUser.deleted_at.is_(None)).first() if email else None)
     if user is None or user.must_change_password:
         return []
     candidates = [p for p in (settings.SEED_ADMIN_PASSWORD, *LEGACY_DEFAULT_ADMIN_PASSWORDS) if p]
@@ -156,8 +198,12 @@ def init_auth_db() -> None:
         seed_default_settings(db)
         ensure_question_categories(db)
         ensure_seed_admin(db)
+        ensure_seed_recruiter(db)
+        ensure_seed_proctor(db)
         seed_recruiter_demo(db)
-        if settings.APP_ENV != "test":  # tests deliberately use a known admin password
+        ensure_demo_exam_paper(db)
+        sync_all_job_exam_papers(db)
+        if settings.IS_PRODUCTION:  # development seeds (and tests) keep the configured password usable
             enforce_admin_password_policy(db)
     finally:
         db.close()

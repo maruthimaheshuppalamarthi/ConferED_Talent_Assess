@@ -1,3 +1,4 @@
+import { FooterComponent } from './components/Footer';
 import { NavbarComponent } from './components/Navbar';
 import { SidebarComponent } from './components/Sidebar';
 import { AdminPortalModule } from './modules/AdminPortal';
@@ -19,6 +20,7 @@ class App {
   private appElement: HTMLElement;
   private navbarHost: HTMLElement;
   private contentHost: HTMLElement;
+  private footerHost: HTMLElement;
   // Portals whose session restore (refresh cookie) is currently running.
   private restoring = new Set<Portal>();
   private wasStaffAuthenticated = false;
@@ -28,14 +30,16 @@ class App {
 
     // Inject Layout Shell
     this.appElement.innerHTML = `
-      <div class="min-h-screen flex flex-col bg-slate-950 text-slate-100">
+      <div id="app-shell" class="min-h-screen flex flex-col bg-slate-950 text-slate-100">
         <div id="navbar-host" class="sticky top-0 z-50"></div>
         <main id="content-host" class="flex-1"></main>
+        <div id="footer-host"></div>
       </div>
     `;
 
     this.navbarHost = document.getElementById('navbar-host') as HTMLElement;
     this.contentHost = document.getElementById('content-host') as HTMLElement;
+    this.footerHost = document.getElementById('footer-host') as HTMLElement;
 
     // Re-render whenever the store changes or the URL changes.
     store.subscribe(() => this.render());
@@ -79,6 +83,20 @@ class App {
 
     const state = store.getState();
     const route = currentRoute();
+    const examLive = state.examStarted && !state.examCompleted;
+    const publicLanding = route.kind === 'candidate' && !state.otpVerified && !examLive;
+    const showFooter = publicLanding || (route.kind === 'staff' && !state.isStaffAuthenticated);
+    const shell = document.getElementById('app-shell');
+    if (shell) {
+      shell.className = publicLanding
+        ? 'min-h-screen flex flex-col bg-white text-[#1f2937]'
+        : 'min-h-screen flex flex-col bg-slate-950 text-slate-100';
+    }
+    if (showFooter) {
+      new FooterComponent(this.footerHost).render();
+    } else {
+      this.footerHost.innerHTML = '';
+    }
 
     // A fresh sign-in (or sign-out) resets in-memory tabs; the URL then restores the open section.
     if (state.isStaffAuthenticated !== this.wasStaffAuthenticated) {

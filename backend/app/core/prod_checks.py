@@ -59,8 +59,10 @@ def config_problems(s: Any = settings) -> Tuple[List[str], List[str]]:
         errors.append(f"FRONTEND_URL ('{s.FRONTEND_URL}') is {front}; invitation links would be unsafe.")
     if s.AUTH_DATABASE_URL.startswith("sqlite"):
         errors.append("AUTH_DATABASE_URL points at SQLite; use the Postgres (Supabase) database.")
-    if s.SEED_ADMIN_PASSWORD and is_weak_for_admin(s.SEED_ADMIN_PASSWORD):
-        errors.append("SEED_ADMIN_PASSWORD is weak. Leave it empty to get a random one, or use 12+ unusual characters.")
+    for name in ("SEED_ADMIN_PASSWORD", "SEED_RECRUITER_PASSWORD", "SEED_PROCTOR_PASSWORD"):
+        value = getattr(s, name, "") or ""
+        if value and is_weak_for_admin(value):
+            errors.append(f"{name} is weak. Leave it empty to get a random one, or use 12+ unusual characters.")
 
     if not (s.SETTINGS_ENCRYPTION_KEY or "").strip():
         warnings.append("SETTINGS_ENCRYPTION_KEY is not set: stored secrets are encrypted with a key derived from SECRET_KEY.")

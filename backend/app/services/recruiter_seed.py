@@ -165,6 +165,8 @@ def seed_recruiter_demo(db: Session) -> bool:
         status="open",
         assessment_id="assess-101",
     ))
+    db.flush()
+    _insert_demo_paper(db)
     for c in CANDIDATES:
         db.add(Candidate(
             id=c["id"], name=c["name"], email=c["email"], phone=c["phone"],
@@ -189,4 +191,62 @@ def seed_recruiter_demo(db: Session) -> bool:
     db.commit()
     logger.info("Seeded recruiter demo: %d questions, 1 assessment, %d candidates, %d results",
                 len(QUESTIONS), len(CANDIDATES), len(RESULTS))
+    return True
+
+
+def _insert_demo_paper(db: Session) -> None:
+    """Questions + sections for assess-101 so a candidate invite has a real paper."""
+    job = db.query(Job).filter(Job.id == "job-101").first()
+    job_id = job.id if job else None
+    if job_id:
+        for q in QUESTIONS:
+            if db.query(Question.id).filter(Question.id == q["id"]).first():
+                continue
+            db.add(Question(
+                id=q["id"], type=q["type"], title=q["title"], content=q["content"],
+                options=q.get("options"), correct_answers=q.get("correct_answers"),
+                sample_code=q.get("sample_code"), language=q.get("language"),
+                test_cases=q.get("test_cases"), essay_min_words=q.get("essay_min_words"),
+                essay_max_words=q.get("essay_max_words"), difficulty=q.get("difficulty") or "medium",
+                points=int(q.get("points") or 10), category=q.get("category") or "General",
+                tags=q.get("tags") or [], section_category=q.get("category") or "General",
+                job_id=job_id, job_role="Senior Software Engineer", status="published",
+            ))
+        db.flush()
+    existing = (
+        db.query(AssessmentSection)
+        .filter(AssessmentSection.assessment_id == "assess-101")
+        .count()
+    )
+    if existing or not job_id:
+        return
+    for s in SECTIONS:
+        db.add(AssessmentSection(
+            id=s["id"], assessment_id="assess-101", name=s["name"],
+            description=s["description"], instructions=s["instructions"],
+            time_limit_minutes=s["time_limit_minutes"], passing_marks=s["passing_marks"],
+            is_mandatory=s["is_mandatory"], randomize_questions=False,
+            question_ids=s["question_ids"], sort_order=s["sort_order"],
+            pool_size=len(s["question_ids"]),
+        ))
+        db.flush()
+        for i, qid in enumerate(s["question_ids"]):
+            db.add(AssessmentSectionQuestion(
+                id=new_id(), section_id=s["id"], question_id=qid, sort_order=i,
+            ))
+
+
+def ensure_demo_exam_paper(db: Session) -> bool:
+    """Fill assess-101 when the original demo job exists but has no paper."""
+    if db.query(Job).filter(Job.id == "job-101").first() is None:
+        return False
+    if db.query(Assessment).filter(Assessment.id == "assess-101").first() is None:
+        return False
+    before_q = db.query(Question.id).filter(Question.job_id == "job-101").first()
+    before_s = db.query(AssessmentSection.id).filter(AssessmentSection.assessment_id == "assess-101").first()
+    if before_q and before_s:
+        return False
+    _insert_demo_paper(db)
+    db.commit()
+    logger.info("Backfilled demo exam paper on assess-101")
     return True

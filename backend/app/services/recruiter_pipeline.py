@@ -278,6 +278,12 @@ FIXED_SECTIONS = (
     "English",
     "Technical",
 )
+_SECTION_MINUTES = {
+    "Quantitative Aptitude": 15,
+    "Logical Reasoning": 15,
+    "English": 10,
+    "Technical": 20,
+}
 
 
 def _category_label_for_job(db: Session, job_id: Optional[str], label: str) -> str:
@@ -336,12 +342,16 @@ def place_question(
             AssessmentSectionQuestion.section_id.in_(section_ids),
         ).delete(synchronize_session=False)
         db.flush()
-    if not section_id:
         for section in sections:
-            ids = [qid for qid in _section_question_ids(db, section) if qid != question.id]
-            section.question_ids = ids
-            section.pool_size = len(ids)
-        return
+            section.question_ids = [qid for qid in (section.question_ids or []) if qid != question.id]
+            section.pool_size = len(_section_question_ids(db, section))
+    if not section_id:
+        label = (question.section_category or question.category or "").strip().lower()
+        match = next((s for s in sections if (s.name or "").strip().lower() == label), None)
+        if match:
+            section_id = match.id
+        else:
+            return
 
     section = next((s for s in sections if s.id == section_id), None)
     if not section:
@@ -465,7 +475,7 @@ def update_question(db: Session, q: Question, body: Dict[str, Any]) -> Dict[str,
     if errs:
         raise ValueError("; ".join(errs))
     apply_question_fields(q, body)
-    if "jobId" in body or "sectionId" in body:
+    if "jobId" in body or "sectionId" in body or "sectionCategory" in body:
         place_question(
             db, q,
             job_id=(body.get("jobId") if "jobId" in body else q.job_id) or None,
@@ -575,6 +585,8 @@ def create_job(db: Session, body: Dict[str, Any]) -> Dict[str, Any]:
         assessment_id=assessment_id,
     )
     db.add(job)
+    db.flush()
+    ensure_standard_exam_sections(db, assessment_id)
     db.commit()
     db.refresh(job)
     return job_out(db, job)
@@ -1007,18 +1019,135 @@ def _session_out(session: AssessmentSession) -> Dict[str, Any]:
     }
 
 
-def ensure_assessment_session(db: Session, invite: CandidateInvite) -> Dict[str, Any]:
-    """Freeze one paper for this invite the first time it is opened."""
-    session = db.query(AssessmentSession).filter(AssessmentSession.invite_id == invite.id).first()
-    if session:
-        return _session_out(session)
-
-    sections = (
+def ensure_standard_exam_sections(db: Session, assessment_id: str) -> List[AssessmentSection]:
+    """Create the four builder sections only when this exam has none yet."""
+    existing = (
         db.query(AssessmentSection)
-        .filter(AssessmentSection.assessment_id == invite.assessment_id)
+        .filter(AssessmentSection.assessment_id == assessment_id)
         .order_by(AssessmentSection.sort_order.asc())
         .all()
     )
+    if existing:
+        return _collapse_duplicate_sections(db, existing)
+    for i, name in enumerate(FIXED_SECTIONS):
+        db.add(AssessmentSection(
+            id=new_id(),
+            assessment_id=assessment_id,
+            name=name,
+            description=name,
+            instructions=f"Complete all questions in {name}.",
+            time_limit_minutes=_SECTION_MINUTES.get(name, 15),
+            passing_marks=10,
+            is_mandatory=True,
+            randomize_questions=True,
+            question_ids=[],
+            sort_order=i,
+            pool_size=0,
+        ))
+    db.flush()
+    created = (
+        db.query(AssessmentSection)
+        .filter(AssessmentSection.assessment_id == assessment_id)
+        .order_by(AssessmentSection.sort_order.asc())
+        .all()
+    )
+    return _collapse_duplicate_sections(db, created)
+
+
+def _collapse_duplicate_sections(db: Session, sections: List[AssessmentSection]) -> List[AssessmentSection]:
+    """Drop empty standard-section clones created if two processes seeded at once."""
+    standard = {name.lower() for name in FIXED_SECTIONS}
+    seen: Dict[str, AssessmentSection] = {}
+    extras: List[AssessmentSection] = []
+    for section in sections:
+        key = (section.name or "").strip().lower()
+        if key not in standard or key not in seen:
+            if key in standard:
+                seen[key] = section
+            continue
+        current = seen[key]
+        current_n = len(_section_question_ids(db, current))
+        other_n = len(_section_question_ids(db, section))
+        if other_n == 0:
+            extras.append(section)
+        elif current_n == 0:
+            extras.append(current)
+            seen[key] = section
+    for section in extras:
+        db.query(AssessmentSectionQuestion).filter(
+            AssessmentSectionQuestion.section_id == section.id
+        ).delete(synchronize_session=False)
+        db.delete(section)
+    if extras:
+        db.flush()
+        return (
+            db.query(AssessmentSection)
+            .filter(AssessmentSection.assessment_id == sections[0].assessment_id)
+            .order_by(AssessmentSection.sort_order.asc())
+            .all()
+        )
+    return sections
+
+
+def sync_job_questions_into_sections(db: Session, assessment_id: str) -> List[AssessmentSection]:
+    """Put job-bank questions onto the matching exam section so the candidate paper is not empty."""
+    sections = ensure_standard_exam_sections(db, assessment_id)
+    job = db.query(Job).filter(Job.assessment_id == assessment_id).first()
+    if not job:
+        return sections
+    questions = (
+        db.query(Question)
+        .filter(Question.job_id == job.id, Question.status != "draft")
+        .all()
+    )
+    if not questions:
+        return sections
+    already: set[str] = set()
+    for section in sections:
+        already.update(_section_question_ids(db, section))
+    by_name = {(s.name or "").strip().lower(): s for s in sections}
+    fallback = by_name.get("technical") or (sections[0] if sections else None)
+    additions: Dict[str, List[str]] = {s.id: [] for s in sections}
+    for question in questions:
+        if question.id in already:
+            continue
+        label = (question.section_category or question.category or "").strip().lower()
+        section = by_name.get(label) or fallback
+        if not section:
+            continue
+        additions[section.id].append(question.id)
+        already.add(question.id)
+    changed = False
+    for section in sections:
+        extra = additions.get(section.id) or []
+        if not extra:
+            continue
+        current = _section_question_ids(db, section)
+        merged = current + [qid for qid in extra if qid not in current]
+        section.question_ids = merged
+        section.pool_size = len(merged)
+        _set_section_pool(db, section.id, merged)
+        changed = True
+    if changed:
+        assessment = db.query(Assessment).filter(Assessment.id == assessment_id).first()
+        if assessment:
+            assessment.total_questions = sum(len(_section_question_ids(db, s)) for s in sections)
+            assessment.total_duration_minutes = sum(s.time_limit_minutes or 0 for s in sections) or assessment.total_duration_minutes
+        db.flush()
+    return sections
+
+
+def sync_all_job_exam_papers(db: Session) -> int:
+    """Backfill every job so existing invites get a non-empty paper."""
+    jobs = db.query(Job).all()
+    for job in jobs:
+        if job.assessment_id:
+            sync_job_questions_into_sections(db, job.assessment_id)
+    db.commit()
+    return len(jobs)
+
+
+def _draw_section_ids(db: Session, sections: List[AssessmentSection]) -> tuple[Dict[str, List[str]], Dict[str, List[str]]]:
     rng = random.Random()
     drawn: Dict[str, List[str]] = {}
     option_order: Dict[str, List[str]] = {}
@@ -1034,7 +1163,24 @@ def ensure_assessment_session(db: Session, invite: CandidateInvite) -> Dict[str,
             order = option_order_for(by_id[qid], rng)
             if order:
                 option_order[qid] = order
+    return drawn, option_order
 
+
+def ensure_assessment_session(db: Session, invite: CandidateInvite) -> Dict[str, Any]:
+    """Freeze one paper for this invite the first time it is opened."""
+    sections = sync_job_questions_into_sections(db, invite.assessment_id)
+    session = db.query(AssessmentSession).filter(AssessmentSession.invite_id == invite.id).first()
+    if session:
+        drawn = session.drawn_question_ids or {}
+        if any(drawn.get(s.id) for s in sections):
+            return _session_out(session)
+        fresh, option_order = _draw_section_ids(db, sections)
+        session.drawn_question_ids = fresh
+        session.option_order = {**(session.option_order or {}), **option_order}
+        db.commit()
+        return _session_out(session)
+
+    drawn, option_order = _draw_section_ids(db, sections)
     session = AssessmentSession(
         id=new_id(),
         invite_id=invite.id,

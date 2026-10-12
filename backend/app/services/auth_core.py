@@ -54,7 +54,7 @@ def mask_email(email: str) -> str:
         masked = local[:1] + "*"
     else:
         masked = local[0] + "*" * (len(local) - 2) + local[-1]
-    return f"{masked}@{domain}"
+    return masked if not domain else f"{masked}@{domain}"
 
 
 def user_out(user: StaffUser) -> UserOut:
@@ -162,7 +162,11 @@ def start_staff_login(db: Session, background: BackgroundTasks, portal: str,
                       email: str, password: str, request: Optional[Request] = None) -> ChallengeOut:
     """Step 1/2 for a portal: check password + that the account belongs to this portal, then email an OTP."""
     email = (email or "").strip().lower()
-    user = db.query(StaffUser).filter(StaffUser.email == email).first()
+    user = (db.query(StaffUser)
+            .filter(StaffUser.email == email,
+                    StaffUser.role == PORTAL_LOGIN_ROLE[portal],
+                    StaffUser.deleted_at.is_(None))
+            .first())
 
     if user and user.locked_until and user.locked_until > utcnow():
         audit.login_failed(db, request, portal, email, user, "account_locked", event="login_blocked")
@@ -196,7 +200,7 @@ def start_staff_login(db: Session, background: BackgroundTasks, portal: str,
     audit.password_verified(db, request, portal, user)
     challenge, code = issue_otp(db, staff_login_purpose(portal), user.id)
     subject, body = email_service.staff_login_otp_email(code, rt.get_int("otpExpireMinutes"))
-    background.add_task(email_service.send_email, user.otp_email, subject, body)
+    email_service.dispatch_otp_email(user.otp_email, subject, body)
     log_dev_otp(f"{portal} login {user.email}", code)
     return challenge_out(challenge, user.otp_email, code)
 
@@ -216,7 +220,7 @@ def create_staff_user(db: Session, name: str, email: str, password: str, role: s
     email = norm_email(email)
     otp_email = norm_email(otp_email) if otp_email else email
     check_password_strength(password, email=email, name=name)
-    existing = db.query(StaffUser).filter(StaffUser.email == email).first()
+    existing = db.query(StaffUser).filter(StaffUser.email == email, StaffUser.role == role).first()
     if existing is not None:
         if existing.deleted_at is not None:
             raise HTTPException(status_code=409,

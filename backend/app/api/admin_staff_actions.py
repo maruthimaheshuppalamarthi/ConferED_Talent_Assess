@@ -55,7 +55,10 @@ def update_profile(user_id: str, body: StaffProfileUpdate, request: Request, bac
         raise HTTPException(status_code=400, detail="You cannot change your own login or 2FA email: "
                                                     "a typo could lock you out. Ask another System Admin.")
     if "email" in changes and changes["email"] != target.email:
-        clash = db.query(StaffUser).filter(StaffUser.email == changes["email"], StaffUser.id != target.id).first()
+        clash = (db.query(StaffUser)
+                 .filter(StaffUser.email == changes["email"], StaffUser.role == target.role,
+                         StaffUser.id != target.id)
+                 .first())
         if clash is not None:
             raise HTTPException(status_code=409, detail=(
                 "This email belonged to a deleted account. Restore that account instead."

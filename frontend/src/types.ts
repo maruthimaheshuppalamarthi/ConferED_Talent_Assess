@@ -147,7 +147,7 @@ export interface ProctoringViolation {
   id: string;
   candidateId: string;
   timestamp: string;
-  type: 'Tab Switch' | 'No Face Detected' | 'Multiple Faces' | 'Mobile Phone Detected' | 'Background Voice' | 'Fullscreen Exit' | 'DevTools Opened' | 'Looking Away';
+  type: 'Tab Switch' | 'No Face Detected' | 'Multiple Faces' | 'Mobile Phone Detected' | 'Object Detected' | 'Background Voice' | 'Fullscreen Exit' | 'DevTools Opened' | 'Looking Away';
   severity: 'low' | 'medium' | 'high';
   snapshotUrl?: string;
   description: string;

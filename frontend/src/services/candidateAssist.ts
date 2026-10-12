@@ -119,6 +119,12 @@ class CandidateAssist {
     this.ws.send(JSON.stringify({ event, severity, timestamp: new Date().toISOString() }));
   }
 
+  sendSnapshot(image: string, reason: string) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    if (!image.startsWith('data:image/jpeg') || image.length > 400000) return;
+    this.ws.send(JSON.stringify({ type: 'snapshot', image, reason }));
+  }
+
   private startPublisher() {
     if (this.publishTimer) return;
     const canvas = document.createElement('canvas');

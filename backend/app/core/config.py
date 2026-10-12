@@ -114,6 +114,13 @@ class Settings:
     SEED_ADMIN_EMAIL: str = os.getenv("SEED_ADMIN_EMAIL", "admin@7666")
     SEED_ADMIN_PASSWORD: str = os.getenv("SEED_ADMIN_PASSWORD", "")
     SEED_ADMIN_NAME: str = os.getenv("SEED_ADMIN_NAME", "System Administrator")
+    # Optional Recruiter / Proctor seed accounts (same pattern). Login is per portal, so the username may be reused.
+    SEED_RECRUITER_EMAIL: str = os.getenv("SEED_RECRUITER_EMAIL", "")
+    SEED_RECRUITER_PASSWORD: str = os.getenv("SEED_RECRUITER_PASSWORD", "")
+    SEED_RECRUITER_NAME: str = os.getenv("SEED_RECRUITER_NAME", "Recruiter")
+    SEED_PROCTOR_EMAIL: str = os.getenv("SEED_PROCTOR_EMAIL", "")
+    SEED_PROCTOR_PASSWORD: str = os.getenv("SEED_PROCTOR_PASSWORD", "")
+    SEED_PROCTOR_NAME: str = os.getenv("SEED_PROCTOR_NAME", "Proctor")
 
     # Auth database (SQLite for local tests; Supabase Postgres via AUTH_DATABASE_URL)
     AUTH_DATABASE_URL: str = os.getenv("AUTH_DATABASE_URL", "sqlite:///./nexus_auth_dev.db")
