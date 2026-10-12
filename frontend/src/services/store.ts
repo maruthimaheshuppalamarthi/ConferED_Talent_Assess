@@ -33,9 +33,11 @@ export interface AppState {
   systemCheckCompleted: boolean;
   examStarted: boolean;
   examCompleted: boolean;
+  assessmentReady: boolean;
   currentSectionIndex: number;
   currentQuestionIndex: number;
   sectionTimeRemainingSeconds: number;
+  sectionEndsAtMs: number | null;
   candidateAnswers: Record<string, any>; // questionId -> answer
   codeSubmissions: Record<string, { code: string; language: string; executionTimeMs?: number; passedCount?: number; totalCount?: number }>;
   flaggedQuestions: Set<string>;
@@ -82,9 +84,11 @@ class Store {
       systemCheckCompleted: false,
       examStarted: false,
       examCompleted: false,
+      assessmentReady: false,
       currentSectionIndex: 0,
       currentQuestionIndex: 0,
       sectionTimeRemainingSeconds: 600,
+      sectionEndsAtMs: null,
       candidateAnswers: {},
       codeSubmissions: {},
       flaggedQuestions: new Set(),
@@ -138,6 +142,10 @@ class Store {
     if (stream && !this.activeStreams.includes(stream)) {
       this.activeStreams.push(stream);
     }
+  }
+
+  public getLiveCameraStream(): MediaStream | null {
+    return this.activeStreams.find(stream => stream.getVideoTracks().some(track => track.readyState === 'live')) || null;
   }
 
   public stopAllMediaStreams() {
@@ -218,16 +226,15 @@ class Store {
   /** Candidate passed server-side invite + OTP verification. */
   public candidateVerified(session: CandidateSession) {
     this.state.activeCandidateId = session.candidate.id;
-    if (this.state.assessments.some(a => a.id === session.candidate.assessmentId)) {
-      this.state.activeAssessmentId = session.candidate.assessmentId;
-    }
+    this.state.activeAssessmentId = session.candidate.assessmentId;
+    this.state.assessmentReady = false;
     this.state.otpVerified = true;
     this.notify();
     void this.loadPolicy('candidate');
     void this.loadCandidateAssessment(session.candidate.assessmentId);
   }
 
-  /** Load sanitized assessment from API (no correct answers). Falls back to local sanitized mock. */
+  /** Load sanitized assessment from API (no correct answers). */
   public async loadCandidateAssessment(assessmentId: string) {
     try {
       const data = await authApi.fetchJson<Assessment>('/candidate/assessment', 'GET', undefined, 'candidate');
@@ -236,14 +243,11 @@ class Store {
       if (idx >= 0) this.state.assessments[idx] = sanitized;
       else this.state.assessments.unshift(sanitized);
       this.state.activeAssessmentId = sanitized.id;
+      this.state.assessmentReady = true;
+      if (this.state.examStarted) this.jumpToFirstQuestion();
       this.notify();
     } catch {
-      // Offline / API miss: still strip keys from any local copy before the exam UI runs.
-      this.state.assessments = this.state.assessments.map(a =>
-        a.id === assessmentId || a.id === this.state.activeAssessmentId
-          ? sanitizeAssessmentQuestions(a)
-          : a,
-      );
+      this.state.assessmentReady = false;
       this.notify();
     }
   }
@@ -261,11 +265,45 @@ class Store {
   public startExam() {
     this.state.examStarted = true;
     this.state.examCompleted = false;
-    const currentSection = this.getActiveAssessment()?.sections[0];
-    if (currentSection) {
-      this.state.sectionTimeRemainingSeconds = currentSection.timeLimitMinutes * 60;
-    }
+    this.state.sectionEndsAtMs = null;
+    this.terminateArmed = false;
+    this.lastCountedViolationAt = {};
+    this.jumpToFirstQuestion(true);
     this.notify();
+    if (this.state.activeCandidateId) {
+      void this.loadCandidateAssessment(this.state.activeAssessmentId);
+    }
+  }
+
+  public getSectionRemainingSeconds(): number {
+    if (this.state.sectionEndsAtMs) {
+      return Math.max(0, Math.ceil((this.state.sectionEndsAtMs - Date.now()) / 1000));
+    }
+    return Math.max(0, this.state.sectionTimeRemainingSeconds || 0);
+  }
+
+  private armSectionClock(minutes: number, force: boolean) {
+    const seconds = Math.max(1, Math.round((minutes || 15) * 60));
+    if (!force && this.state.sectionEndsAtMs && this.state.sectionEndsAtMs > Date.now()) {
+      this.state.sectionTimeRemainingSeconds = this.getSectionRemainingSeconds();
+      return;
+    }
+    this.state.sectionEndsAtMs = Date.now() + seconds * 1000;
+    this.state.sectionTimeRemainingSeconds = seconds;
+  }
+
+  public jumpToFirstQuestion(resetClock = false) {
+    const assessment = this.getActiveAssessment();
+    const sections = assessment?.sections || [];
+    const idx = sections.findIndex(sec => (sec.questions || []).length > 0);
+    const nextIndex = idx >= 0 ? idx : 0;
+    const sectionChanged = nextIndex !== this.state.currentSectionIndex;
+    this.state.currentSectionIndex = nextIndex;
+    this.state.currentQuestionIndex = 0;
+    const currentSection = sections[this.state.currentSectionIndex];
+    if (currentSection) {
+      this.armSectionClock(currentSection.timeLimitMinutes || 15, resetClock || sectionChanged);
+    }
   }
 
   public getActiveAssessment(): Assessment | undefined {
@@ -315,11 +353,13 @@ class Store {
 
   public nextSection() {
     const assessment = this.getActiveAssessment();
-    if (assessment && this.state.currentSectionIndex < assessment.sections.length - 1) {
-      this.state.currentSectionIndex++;
+    const sections = assessment?.sections || [];
+    let next = this.state.currentSectionIndex + 1;
+    while (next < sections.length && !(sections[next].questions || []).length) next++;
+    if (next < sections.length) {
+      this.state.currentSectionIndex = next;
       this.state.currentQuestionIndex = 0;
-      const newSection = assessment.sections[this.state.currentSectionIndex];
-      this.state.sectionTimeRemainingSeconds = newSection.timeLimitMinutes * 60;
+      this.armSectionClock(sections[next].timeLimitMinutes || 15, true);
       this.notify();
     } else {
       this.submitAssessment();
@@ -329,6 +369,7 @@ class Store {
   public submitAssessment() {
     this.state.examStarted = false;
     this.state.examCompleted = true;
+    this.state.sectionEndsAtMs = null;
 
     this.stopAllMediaStreams();
     if (document.fullscreenElement) {
@@ -367,7 +408,17 @@ class Store {
     this.notify();
   }
 
-  public logProctoringViolation(type: ProctoringViolation['type'], description: string, severity: 'low' | 'medium' | 'high' = 'medium') {
+  private lastCountedViolationAt: Partial<Record<ProctoringViolation['type'], number>> = {};
+  private terminateArmed = false;
+
+  public logProctoringViolation(type: ProctoringViolation['type'], description: string, severity: 'low' | 'medium' | 'high' = 'medium', extras?: { snapshotUrl?: string }) {
+    if (!this.state.examStarted || this.state.examCompleted) return;
+
+    const repeating = type === 'No Face Detected' || type === 'Multiple Faces' || type === 'Object Detected' || type === 'Mobile Phone Detected' || type === 'Looking Away';
+    const now = Date.now();
+    if (repeating && now - (this.lastCountedViolationAt[type] || 0) < 8000) return;
+    this.lastCountedViolationAt[type] = now;
+
     this.state.violationCount++;
     const violation: ProctoringViolation = {
       id: `viol-${Date.now()}`,
@@ -375,6 +426,7 @@ class Store {
       timestamp: new Date().toLocaleTimeString(),
       type,
       severity,
+      snapshotUrl: extras?.snapshotUrl,
       description
     };
 
@@ -389,11 +441,12 @@ class Store {
       activeEntry.lastEvent = `${type} detected`;
     }
 
-    if (this.state.violationCount >= this.state.settings.maxViolationsBeforeTerminate) {
-      this.state.liveProctoringAlert = `EXAM TERMINATED: Violation limit exceeded (${this.state.violationCount}/${this.state.settings.maxViolationsBeforeTerminate})`;
-      setTimeout(() => {
-        this.submitAssessment();
-      }, 3000);
+    if (this.state.violationCount >= this.state.settings.maxViolationsBeforeTerminate && !this.terminateArmed) {
+      this.terminateArmed = true;
+      this.state.liveProctoringAlert = `EXAM TERMINATED: Warning limit reached (${this.state.violationCount}/${this.state.settings.maxViolationsBeforeTerminate})`;
+      window.setTimeout(() => {
+        if (!this.state.examCompleted) this.submitAssessment();
+      }, 1200);
     }
 
     this.notify();

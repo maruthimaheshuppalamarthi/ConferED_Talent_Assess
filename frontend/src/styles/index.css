@@ -4,7 +4,9 @@
 
 @layer base {
   body {
-    @apply bg-slate-950 text-slate-100 font-sans antialiased selection:bg-blue-600 selection:text-white min-h-screen transition-colors duration-300;
+    @apply font-sans antialiased min-h-screen transition-colors duration-300;
+    background: #ffffff;
+    color: #1f2937;
   }
 }
 
@@ -92,6 +94,31 @@ html.light-mode .border-slate-800\/60 {
 /* Text Colors - High Contrast */
 html.light-mode .text-white {
   color: #0f172a !important;
+}
+
+html.light-mode footer .text-white,
+html.light-mode .confer-hero .text-white {
+  color: #ffffff !important;
+}
+
+html.light-mode footer .text-white\/80,
+html.light-mode .confer-hero .text-white\/80 {
+  color: rgba(255, 255, 255, 0.8) !important;
+}
+
+html.light-mode footer .text-white\/70,
+html.light-mode .confer-hero .text-white\/70 {
+  color: rgba(255, 255, 255, 0.7) !important;
+}
+
+html.light-mode footer .text-white\/65,
+html.light-mode .confer-hero .text-white\/65 {
+  color: rgba(255, 255, 255, 0.65) !important;
+}
+
+html.light-mode footer .text-white\/60,
+html.light-mode .confer-hero .text-white\/60 {
+  color: rgba(255, 255, 255, 0.6) !important;
 }
 
 html.light-mode .text-slate-100,

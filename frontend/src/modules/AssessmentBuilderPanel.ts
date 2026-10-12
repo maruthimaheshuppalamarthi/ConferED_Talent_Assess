@@ -591,7 +591,8 @@ export class AssessmentBuilderPanel {
       body.correctAnswers = type === 'msq' ? ['a', 'b'] : ['b'];
     }
     try {
-      const created = await recruiterApi.createJobQuestion(job.id, body as { type: string; title: string });
+      const created = await recruiterApi.createJobQuestion(
+        job.id, body as Partial<Question> & { type: Question['type']; title: string });
       const poolInput = host.querySelector('#sec-pool-ids') as HTMLInputElement;
       const ids = new Set((poolInput.value || '').split(',').filter(Boolean));
       ids.add(created.id);

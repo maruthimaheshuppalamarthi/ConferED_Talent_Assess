@@ -88,6 +88,25 @@ def test_wrong_password_rejected(client):
     assert login_step1(client, "admin", ADMIN["email"], "nope").status_code == 401
 
 
+def test_same_username_on_each_portal_is_looked_up_from_the_database(client):
+    from app.core.security import hash_password
+    from app.db.session import SessionLocal
+    from app.models.auth import StaffUser
+
+    with SessionLocal() as db:
+        for role, name in (("System Admin", "Seed Admin"), ("Recruiter", "Seed Recruiter"),
+                           ("Proctor", "Seed Proctor")):
+            db.add(StaffUser(
+                email="admin", otp_email="platform@example.test", full_name=name, role=role,
+                password_hash=hash_password("admin"), must_change_password=False,
+            ))
+        db.commit()
+
+    for portal in ("admin", "recruiter", "proctor"):
+        assert login_step1(client, portal, "admin", "admin").status_code == 200
+    assert login_step1(client, "recruiter", ADMIN["email"], ADMIN["password"]).status_code == 401
+
+
 def test_each_portal_login_accepts_only_its_own_role(client):
     admin = admin_token(client)
     create_staff(client, admin, "Rita", "rita@corp.com", "Recruiter", password="Blue-Harbor-4821")

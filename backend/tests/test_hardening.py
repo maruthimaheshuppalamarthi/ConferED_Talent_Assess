@@ -328,7 +328,7 @@ def test_the_real_signing_key_is_not_the_leaked_one():
 def test_secrets_have_no_hardcoded_defaults_in_the_source():
     source = (BACKEND / "app" / "core" / "config.py").read_text(encoding="utf-8")
     for name in ("SECRET_KEY", "SETTINGS_ENCRYPTION_KEY", "GMAIL_APP_PASSWORD", "GMAIL_SENDER_EMAIL",
-                 "SEED_ADMIN_PASSWORD"):
+                 "SEED_ADMIN_PASSWORD", "SEED_RECRUITER_PASSWORD", "SEED_PROCTOR_PASSWORD"):
         assert not re.search(rf'getenv\(\s*"{name}"\s*,\s*"[^"]+"', source), f"{name} has a hardcoded default"
     for path in (BACKEND / "app").rglob("*.py"):
         text = path.read_text(encoding="utf-8")
@@ -379,6 +379,8 @@ def test_a_correct_production_configuration_passes_cleanly():
     ({"AUTH_DATABASE_URL": "sqlite:///./x.db"}, "SQLite"),
     ({"SEED_ADMIN_PASSWORD": "970598"}, "SEED_ADMIN_PASSWORD"),
     ({"SEED_ADMIN_PASSWORD": "Welcome12345"}, "SEED_ADMIN_PASSWORD"),
+    ({"SEED_RECRUITER_PASSWORD": "admin"}, "SEED_RECRUITER_PASSWORD"),
+    ({"SEED_PROCTOR_PASSWORD": "admin"}, "SEED_PROCTOR_PASSWORD"),
 ])
 def test_each_unsafe_production_setting_blocks_the_start(override, expected):
     errors, _ = prod_checks.config_problems(prod_settings(**override))
@@ -432,6 +434,35 @@ def test_an_explicit_admin_password_is_trusted_and_never_logged(db, monkeypatch,
     assert verify_password("Orchard-Velvet-Lantern-52", admin_row.password_hash)
     assert admin_row.must_change_password is False
     assert "Orchard-Velvet-Lantern-52" not in caplog.text
+
+
+def test_each_portal_can_share_the_same_seed_username(db, monkeypatch):
+    for attr, value in (
+        ("SEED_ADMIN_EMAIL", "admin"), ("SEED_ADMIN_PASSWORD", "admin"), ("SEED_ADMIN_NAME", "System Administrator"),
+        ("SEED_RECRUITER_EMAIL", "admin"), ("SEED_RECRUITER_PASSWORD", "admin"), ("SEED_RECRUITER_NAME", "Recruiter"),
+        ("SEED_PROCTOR_EMAIL", "admin"), ("SEED_PROCTOR_PASSWORD", "admin"), ("SEED_PROCTOR_NAME", "Proctor"),
+    ):
+        monkeypatch.setattr(settings, attr, value)
+    assert bootstrap.ensure_seed_admin(db) is None
+    assert bootstrap.ensure_seed_recruiter(db) is None
+    assert bootstrap.ensure_seed_proctor(db) is None
+    rows = db.query(StaffUser).order_by(StaffUser.role).all()
+    assert [u.role for u in rows] == ["Proctor", "Recruiter", "System Admin"]
+    assert {u.email for u in rows} == {"admin"}
+    assert all(verify_password("admin", u.password_hash) and u.must_change_password is False for u in rows)
+    assert bootstrap.ensure_seed_recruiter(db) is None and db.query(StaffUser).count() == 3
+
+
+def test_recruiter_and_proctor_are_not_invented_without_env(db, monkeypatch):
+    monkeypatch.setattr(settings, "SEED_ADMIN_EMAIL", "first@admin.test")
+    monkeypatch.setattr(settings, "SEED_ADMIN_PASSWORD", "Orchard-Velvet-Lantern-52")
+    monkeypatch.setattr(settings, "SEED_RECRUITER_EMAIL", "")
+    monkeypatch.setattr(settings, "SEED_RECRUITER_PASSWORD", "")
+    monkeypatch.setattr(settings, "SEED_PROCTOR_EMAIL", "")
+    monkeypatch.setattr(settings, "SEED_PROCTOR_PASSWORD", "")
+    bootstrap.ensure_seed_admin(db)
+    assert bootstrap.ensure_seed_recruiter(db) is None and bootstrap.ensure_seed_proctor(db) is None
+    assert db.query(StaffUser).count() == 1
 
 
 def _admin(db, password, **kw):

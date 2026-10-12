@@ -1,167 +1,387 @@
+import { candidateAssist } from '../services/candidateAssist';
+import { detectFaces, ensureFaceTracker, isFaceTrackerReady, lerpBox, FaceBox } from '../services/faceTracker';
 import { store } from '../services/store';
+import { ProctoringViolation } from '../types';
 
-export class ProctoringOverlayComponent {
-  private container: HTMLElement;
-  private mediaStream: MediaStream | null = null;
-  private analysisInterval: any = null;
-  private canvas: HTMLCanvasElement | null = null;
-  private missingFaceCounter: number = 0;
+type MonitorStatus = 'loading' | 'in-frame' | 'out-of-frame' | 'multiple';
 
-  constructor(container: HTMLElement) {
-    this.container = container;
+const DEFAULT_WIDTH = 168;
+const MIN_WIDTH = 128;
+const MAX_WIDTH = 420;
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
+class ProctoringOverlay {
+  private root: HTMLElement | null = null;
+  private stream: MediaStream | null = null;
+  private ownStream = false;
+  private raf = 0;
+  private lastTick = 0;
+  private missingMs = 0;
+  private extraMs = 0;
+  private lastStatus: MonitorStatus = 'loading';
+  private box: FaceBox | null = null;
+  private pos = { x: 0, y: 72 };
+  private width = DEFAULT_WIDTH;
+  private dragging = false;
+  private resizing = false;
+  private dragOffset = { x: 0, y: 0 };
+  private resizeStart = { x: 0, width: DEFAULT_WIDTH };
+  private blurBound = false;
+  private shotAt = 0;
+  private video: HTMLVideoElement | null = null;
+
+  mount() {
+    if (this.root) return;
+    this.pos.x = Math.max(16, window.innerWidth - this.width - 16);
+    this.pos.y = 72;
+    this.root = document.createElement('div');
+    this.root.id = 'exam-camera-overlay';
+    document.body.appendChild(this.root);
+    this.paintShell();
+    this.bindDrag();
+    this.bindResize();
+    this.bindBlur();
+    void ensureFaceTracker();
+    this.initVideo().catch(err => console.error('Exam camera failed', err));
   }
 
-  public render() {
+  teardown() {
+    if (this.raf) cancelAnimationFrame(this.raf);
+    this.raf = 0;
+    if (this.ownStream) this.stream?.getTracks().forEach(track => track.stop());
+    this.stream = null;
+    this.ownStream = false;
+    this.video = null;
+    this.root?.remove();
+    this.root = null;
+    this.missingMs = 0;
+    this.extraMs = 0;
+    this.box = null;
+  }
+
+  private paintShell() {
+    if (!this.root) return;
     const state = store.getState();
-
-    this.container.innerHTML = `
-      <div class="fixed bottom-4 right-4 z-40 flex flex-col items-end gap-3 pointer-events-auto">
-        <!-- Floating Violation Alert Toast Banner -->
-        ${state.liveProctoringAlert ? `
-          <div class="glass-panel p-3.5 rounded-2xl border border-red-500/40 bg-red-950/90 shadow-2xl animate-pulse-red max-w-sm flex items-center gap-3">
-            <div class="w-8 h-8 rounded-xl bg-red-500/20 text-red-400 flex items-center justify-center text-lg shrink-0">⚠️</div>
-            <div>
-              <h4 class="text-xs font-bold text-red-300 uppercase tracking-wider">Proctoring Warning</h4>
-              <p class="text-xs text-white font-medium">${state.liveProctoringAlert}</p>
+    const max = state.settings.maxViolationsBeforeTerminate;
+    this.root.innerHTML = `
+      <div id="exam-cam-card" class="fixed z-[60] select-none" style="left:${this.pos.x}px;top:${this.pos.y}px;width:${this.width}px">
+        <div class="relative rounded-xl border border-slate-700/80 bg-slate-950/95 shadow-2xl overflow-hidden">
+          <div id="exam-cam-handle" role="button" aria-label="Drag camera" class="cursor-grab active:cursor-grabbing px-1.5 py-1 flex items-center justify-between gap-1 bg-slate-900/95 border-b border-slate-800">
+            <div class="flex items-center gap-1 min-w-0">
+              <span class="text-slate-500 text-[10px] tracking-widest">⠿</span>
+              <span class="inline-flex items-center gap-1 px-1 py-0.5 rounded bg-red-500/15 border border-red-500/40">
+                <span class="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse"></span>
+                <span class="text-[9px] font-black tracking-wider text-red-400">REC</span>
+              </span>
             </div>
+            <span id="exam-cam-warns" class="text-[9px] font-bold text-slate-300 whitespace-nowrap">${state.violationCount}/${max}</span>
           </div>
-        ` : ''}
-
-        <!-- Clean Candidate Live Camera Video PIP (NO TEXT, NO OVERLAYS) -->
-        <div class="glass-panel p-1 rounded-2xl border border-slate-700/80 shadow-2xl w-48 bg-slate-950/90 overflow-hidden">
-          <div class="relative w-full aspect-video rounded-xl bg-slate-900 overflow-hidden flex items-center justify-center">
-            <video id="proctor-pip-video" autoplay playsinline muted class="w-full h-full object-cover rounded-xl"></video>
-            <div id="pip-fallback" class="absolute inset-0 bg-slate-950 flex flex-col items-center justify-center text-slate-600">
-              <span class="text-2xl">📷</span>
-            </div>
+          <div class="relative aspect-video bg-slate-900 overflow-hidden">
+            <video id="proctor-pip-video" autoplay playsinline muted class="w-full h-full object-cover" style="transform:scaleX(-1)"></video>
+            <div id="exam-face-box" class="absolute rounded-md border-[3px] pointer-events-none" style="display:none"></div>
+            <div id="exam-cam-fallback" class="absolute inset-0 bg-slate-950 flex items-center justify-center text-slate-500 text-lg">📷</div>
+            <div id="exam-shot-flash" class="absolute inset-0 bg-white/70 opacity-0 pointer-events-none transition-opacity duration-150"></div>
+            <div id="exam-cam-badge" class="absolute left-1.5 bottom-1.5 px-1.5 py-0.5 rounded-md text-[9px] font-black uppercase tracking-wider bg-slate-700 text-white">Finding face</div>
           </div>
+          <button type="button" id="exam-cam-resize" aria-label="Resize camera" title="Drag corner to resize" class="absolute bottom-0 right-0 w-5 h-5 cursor-se-resize text-slate-200 hover:text-white bg-slate-800/90 hover:bg-blue-600 rounded-tl-md flex items-center justify-center">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+              <path d="M11 5V11H5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M11 8.5L8.5 11M11 6L6 11" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+            </svg>
+          </button>
+        </div>
+        <div id="exam-cam-toast" class="hidden mt-2 max-w-full rounded-xl border border-red-500/40 bg-red-950/95 px-3 py-2 shadow-xl">
+          <p class="text-[10px] font-bold uppercase tracking-wider text-red-300">Warning</p>
+          <p id="exam-cam-toast-copy" class="text-xs font-medium text-white"></p>
         </div>
       </div>
-
-      <!-- Live Proctor Intercom / 360° Room Inspection Pitch Overlay Modal -->
-      ${state.proctorIntercomMessage ? `
-        <div class="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4">
-          <div class="glass-panel p-6 rounded-3xl border border-purple-500/50 bg-slate-950/95 max-w-md w-full text-center space-y-5 shadow-2xl">
-            <div class="w-16 h-16 rounded-full bg-purple-500/20 text-purple-300 flex items-center justify-center text-3xl mx-auto border border-purple-500/40 animate-pulse">
-              🎙️
-            </div>
-            <div>
-              <span class="px-3 py-1 rounded-full bg-purple-500/20 text-purple-300 text-[10px] font-bold uppercase tracking-wider">LIVE PROCTOR VOICE INTERCOM ACTIVE</span>
-              <h3 class="text-lg font-extrabold text-white mt-2">Proctor Inspection Pitch Received</h3>
-            </div>
-
-            <div class="p-4 rounded-2xl bg-slate-900 border border-slate-800 text-xs text-purple-200 font-medium space-y-2 text-left">
-              <p class="text-[11px] text-slate-400 font-mono">From: Head Exam Proctor</p>
-              <p class="text-sm font-bold text-white">"${state.proctorIntercomMessage}"</p>
-            </div>
-
-            <div class="p-3 rounded-xl bg-purple-950/30 border border-purple-800/40 text-xs text-purple-300 font-semibold">
-              📹 Please rotate your laptop / camera 360° around your desk and room to complete the environment scan.
-            </div>
-
-            <button id="acknowledge-intercom-btn" class="w-full py-3 rounded-2xl bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs shadow-lg transition-all">
-              ✓ ACKNOWLEDGE & COMPLETE ROOM SCAN
-            </button>
-          </div>
-        </div>
-      ` : ''}
     `;
-
-    this.initVideo().catch((e) => console.error('Proctoring camera init failed', e));
-    this.attachEvents();
   }
 
-  private async initVideo() {
-    const video = this.container.querySelector('#proctor-pip-video') as HTMLVideoElement;
-    const fallback = this.container.querySelector('#pip-fallback') as HTMLElement;
+  private card() {
+    return this.root?.querySelector('#exam-cam-card') as HTMLElement | null;
+  }
 
-    try {
-      this.mediaStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-      if (this.mediaStream) {
-        store.registerMediaStream(this.mediaStream);
+  private bindDrag() {
+    const handle = this.root?.querySelector('#exam-cam-handle') as HTMLElement | null;
+    if (!handle) return;
+    const move = (ev: MouseEvent) => {
+      if (!this.dragging) return;
+      this.pos.x = clamp(ev.clientX - this.dragOffset.x, 8, window.innerWidth - 80);
+      this.pos.y = clamp(ev.clientY - this.dragOffset.y, 8, window.innerHeight - 80);
+      const card = this.card();
+      if (card) {
+        card.style.left = `${this.pos.x}px`;
+        card.style.top = `${this.pos.y}px`;
       }
-      if (video) {
-        video.srcObject = this.mediaStream;
-        if (fallback) fallback.style.display = 'none';
-        
-        // Start face absence tracking immediately
-        video.play().catch(() => {});
-        this.startFaceTrackerLoop(video);
-      }
-    } catch (e) {
-      // Fallback
+    };
+    const stop = () => {
+      if (!this.dragging) return;
+      this.dragging = false;
+      handle.classList.replace('cursor-grabbing', 'cursor-grab');
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('pointerup', stop);
+      window.removeEventListener('mouseup', stop);
+    };
+    const start = (ev: MouseEvent) => {
+      if (ev.button !== 0) return;
+      this.dragging = true;
+      this.dragOffset.x = ev.clientX - this.pos.x;
+      this.dragOffset.y = ev.clientY - this.pos.y;
+      handle.classList.replace('cursor-grab', 'cursor-grabbing');
+      window.addEventListener('pointermove', move);
+      window.addEventListener('mousemove', move);
+      window.addEventListener('pointerup', stop);
+      window.addEventListener('mouseup', stop);
+    };
+    handle.addEventListener('pointerdown', start);
+    handle.addEventListener('mousedown', start);
+  }
+
+  private bindResize() {
+    const grip = this.root?.querySelector('#exam-cam-resize') as HTMLElement | null;
+    if (!grip) return;
+    const move = (ev: MouseEvent) => {
+      if (!this.resizing) return;
+      this.setWidth(this.resizeStart.width + (ev.clientX - this.resizeStart.x));
+    };
+    const stop = () => {
+      this.resizing = false;
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('pointerup', stop);
+      window.removeEventListener('mouseup', stop);
+    };
+    const start = (ev: MouseEvent) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      this.resizing = true;
+      this.resizeStart = { x: ev.clientX, width: this.width };
+      window.addEventListener('pointermove', move);
+      window.addEventListener('mousemove', move);
+      window.addEventListener('pointerup', stop);
+      window.addEventListener('mouseup', stop);
+    };
+    grip.addEventListener('pointerdown', start);
+    grip.addEventListener('mousedown', start);
+  }
+
+  private setWidth(next: number) {
+    const width = clamp(next, MIN_WIDTH, MAX_WIDTH);
+    const overflow = this.pos.x + width - (window.innerWidth - 8);
+    if (overflow > 0) this.pos.x = Math.max(8, this.pos.x - overflow);
+    this.width = width;
+    const card = this.card();
+    if (card) {
+      card.style.width = `${this.width}px`;
+      card.style.left = `${this.pos.x}px`;
     }
   }
 
-  private startFaceTrackerLoop(video: HTMLVideoElement) {
-    if (this.analysisInterval) clearInterval(this.analysisInterval);
-    this.canvas = document.createElement('canvas');
-    const ctx = this.canvas.getContext('2d', { willReadFrequently: true });
-
-    this.analysisInterval = setInterval(() => {
-      const state = store.getState();
-      if (!state.examStarted || state.examCompleted || !video) {
-        return;
-      }
-
-      if (!this.canvas || !ctx) return;
-      this.canvas.width = 160;
-      this.canvas.height = 120;
-
-      try {
-        ctx.drawImage(video, 0, 0, 160, 120);
-        const imgData = ctx.getImageData(0, 0, 160, 120);
-        const data = imgData.data;
-
-        let skinPixelCount = 0;
-        let totalBrightness = 0;
-
-        // Sample center frame region (30px to 130px X, 20px to 100px Y)
-        for (let y = 20; y < 100; y += 4) {
-          for (let x = 30; x < 130; x += 4) {
-            const idx = (y * 160 + x) * 4;
-            const r = data[idx];
-            const g = data[idx + 1];
-            const b = data[idx + 2];
-
-            const luminance = 0.299 * r + 0.587 * g + 0.114 * b;
-            totalBrightness += luminance;
-
-            // Skin tone color distribution check
-            if (r > 50 && g > 30 && b > 15 && r > g && g > b && (r - Math.min(g, b)) > 12) {
-              skinPixelCount++;
-            }
-          }
-        }
-
-        const sampledCount = (20 * 25);
-        const avgBrightness = totalBrightness / sampledCount;
-
-        // Trigger warning if skin pixel density is low (candidate turned away or left frame) or light is blocked
-        if (skinPixelCount < 12 || avgBrightness < 15) {
-          store.logProctoringViolation('No Face Detected', 'Candidate face turned away or not visible in camera frame!', 'high');
-        } else {
-          // Immediately clear warning popup as soon as face is detected!
-          if (state.liveProctoringAlert?.includes('No Face Detected')) {
-            store.clearProctoringAlert();
-          }
-        }
-      } catch (e) {
-        // Ignore frame capture error
-      }
-    }, 1000);
-  }
-
-  private attachEvents() {
-    this.container.querySelector('#acknowledge-intercom-btn')?.addEventListener('click', () => {
-      store.clearProctorIntercom();
-    });
-
-    window.onblur = () => {
+  private bindBlur() {
+    if (this.blurBound) return;
+    this.blurBound = true;
+    window.addEventListener('blur', () => {
       const state = store.getState();
       if (state.examStarted && !state.examCompleted) {
-        store.logProctoringViolation('Tab Switch', 'Window focus lost (Tab switch or window navigation detected).', 'high');
+        this.warn('Tab Switch', 'Window focus lost (tab switch or another window).', 'high');
       }
+    });
+  }
+
+  private async initVideo() {
+    const video = this.root?.querySelector('#proctor-pip-video') as HTMLVideoElement | null;
+    const fallback = this.root?.querySelector('#exam-cam-fallback') as HTMLElement | null;
+    const existing = store.getLiveCameraStream();
+    try {
+      this.stream = existing || await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: true });
+      this.ownStream = !existing;
+      if (this.stream) store.registerMediaStream(this.stream);
+      if (video && this.stream) {
+        this.video = video;
+        video.srcObject = this.stream;
+        if (fallback) fallback.style.display = 'none';
+        await video.play().catch(() => undefined);
+        this.startMonitor();
+      }
+    } catch {
+      if (fallback) fallback.textContent = 'Camera blocked';
+    }
+  }
+
+  private startMonitor() {
+    if (this.raf) cancelAnimationFrame(this.raf);
+    this.lastTick = performance.now();
+    const step = (now: number) => {
+      this.raf = requestAnimationFrame(step);
+      this.tick(now);
     };
+    this.raf = requestAnimationFrame(step);
+  }
+
+  private tick(now: number) {
+    const video = this.video;
+    if (!video || !video.videoWidth || !this.root) return;
+    const dt = Math.min(80, now - this.lastTick);
+    this.lastTick = now;
+    const state = store.getState();
+
+    if (!isFaceTrackerReady()) {
+      this.paintFrame('loading', this.box, false);
+      this.paintChrome(state.violationCount, state.settings.maxViolationsBeforeTerminate);
+      return;
+    }
+
+    const faces = detectFaces(video, now);
+    const primary = faces[0] || null;
+    const inFrame = !!primary;
+    let status: MonitorStatus = inFrame ? 'in-frame' : 'out-of-frame';
+    if (state.settings.detectMultipleFaces && faces.length >= 2) status = 'multiple';
+
+    if (primary) this.box = lerpBox(this.box, primary, 0.55);
+    this.paintFrame(status, this.box || primary, !inFrame);
+    this.paintChrome(state.violationCount, state.settings.maxViolationsBeforeTerminate);
+
+    const examLive = state.examStarted && !state.examCompleted;
+    if (!examLive) return;
+
+    if (!inFrame) {
+      this.missingMs += dt;
+      this.extraMs = 0;
+      if (this.missingMs >= 900) {
+        this.warn('No Face Detected', 'No face recognized. Look at the camera and stay in frame.', 'high');
+        this.missingMs = 0;
+      }
+    } else if (status === 'multiple') {
+      this.extraMs += dt;
+      this.missingMs = 0;
+      if (this.extraMs >= 800) {
+        this.captureShot(video, 'Another person was detected in the camera.');
+        this.warn('Multiple Faces', 'Another face was recognized. Only the candidate may be in view.', 'high');
+        this.extraMs = 0;
+      }
+    } else {
+      this.missingMs = 0;
+      this.extraMs = 0;
+      if (this.lastStatus !== 'in-frame') this.hideToast();
+    }
+    this.lastStatus = status;
+  }
+
+  private paintFrame(status: MonitorStatus, box: FaceBox | null, outOfFrame: boolean) {
+    const frame = this.root?.querySelector('#exam-face-box') as HTMLElement | null;
+    const badge = this.root?.querySelector('#exam-cam-badge') as HTMLElement | null;
+    if (!frame || !badge) return;
+
+    const labels: Record<MonitorStatus, string> = {
+      loading: 'Finding face',
+      'in-frame': 'Face locked',
+      'out-of-frame': 'No face',
+      multiple: 'Other face',
+    };
+    const badgeClass: Record<MonitorStatus, string> = {
+      loading: 'bg-slate-700 text-white',
+      'in-frame': 'bg-emerald-500 text-white',
+      'out-of-frame': 'bg-red-600 text-white',
+      multiple: 'bg-amber-500 text-slate-950',
+    };
+    badge.className = `absolute left-1.5 bottom-1.5 px-1.5 py-0.5 rounded-md text-[9px] font-black uppercase tracking-wider ${badgeClass[status]}`;
+    badge.textContent = labels[status];
+
+    const draw = outOfFrame || !box ? { x: 0.06, y: 0.06, w: 0.88, h: 0.88 } : box;
+    const host = frame.parentElement;
+    const vw = this.video?.videoWidth || 640;
+    const vh = this.video?.videoHeight || 480;
+    const ew = host?.clientWidth || this.width;
+    const eh = host?.clientHeight || Math.round(this.width * 9 / 16);
+    const videoAspect = vw / vh;
+    const viewAspect = ew / Math.max(eh, 1);
+    let scale = ew / vw;
+    let ox = 0;
+    let oy = 0;
+    if (viewAspect > videoAspect) {
+      scale = ew / vw;
+      oy = (eh - vh * scale) / 2;
+    } else {
+      scale = eh / vh;
+      ox = (ew - vw * scale) / 2;
+    }
+    const mirroredX = 1 - draw.x - draw.w;
+    frame.style.display = 'block';
+    frame.style.left = `${ox + mirroredX * vw * scale}px`;
+    frame.style.top = `${oy + draw.y * vh * scale}px`;
+    frame.style.width = `${draw.w * vw * scale}px`;
+    frame.style.height = `${draw.h * vh * scale}px`;
+    const red = outOfFrame || status === 'out-of-frame';
+    frame.style.borderColor = red ? '#ef4444' : status === 'multiple' ? '#f59e0b' : '#22c55e';
+    frame.style.boxShadow = red
+      ? '0 0 0 999px rgba(239,68,68,0.16) inset'
+      : '0 0 0 1px rgba(34,197,94,0.35)';
+  }
+
+  private paintChrome(count: number, max: number) {
+    const warns = this.root?.querySelector('#exam-cam-warns');
+    if (warns) warns.textContent = `${count}/${max}`;
+  }
+
+  private showToast(copy: string) {
+    const toast = this.root?.querySelector('#exam-cam-toast') as HTMLElement | null;
+    const text = this.root?.querySelector('#exam-cam-toast-copy');
+    if (!toast || !text) return;
+    text.textContent = copy;
+    toast.classList.remove('hidden');
+  }
+
+  private hideToast() {
+    this.root?.querySelector('#exam-cam-toast')?.classList.add('hidden');
+  }
+
+  private warn(type: ProctoringViolation['type'], description: string, severity: 'low' | 'medium' | 'high') {
+    this.showToast(description);
+    store.logProctoringViolation(type, description, severity);
+  }
+
+  private captureShot(video: HTMLVideoElement, reason: string) {
+    const now = Date.now();
+    if (now - this.shotAt < 8000 || !video.videoWidth) return;
+    this.shotAt = now;
+    const shot = document.createElement('canvas');
+    const width = 480;
+    const height = Math.round((video.videoHeight / video.videoWidth) * width) || 270;
+    shot.width = width;
+    shot.height = height;
+    const ctx = shot.getContext('2d');
+    if (!ctx) return;
+    ctx.drawImage(video, 0, 0, width, height);
+    const image = shot.toDataURL('image/jpeg', 0.55);
+    candidateAssist.sendSnapshot(image, reason);
+    const flash = this.root?.querySelector('#exam-shot-flash') as HTMLElement | null;
+    if (flash) {
+      flash.style.opacity = '1';
+      window.setTimeout(() => { flash.style.opacity = '0'; }, 140);
+    }
+  }
+}
+
+const overlay = new ProctoringOverlay();
+
+export function ensureProctoringOverlay() {
+  overlay.mount();
+}
+
+export function teardownProctoringOverlay() {
+  overlay.teardown();
+}
+
+export class ProctoringOverlayComponent {
+  constructor(private container: HTMLElement) {}
+
+  public render() {
+    ensureProctoringOverlay();
+    this.container.innerHTML = '';
   }
 }

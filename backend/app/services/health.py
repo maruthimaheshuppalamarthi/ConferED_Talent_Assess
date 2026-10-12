@@ -111,7 +111,10 @@ def security_findings(db: Session) -> List[Dict[str, str]]:
     if not (settings.SETTINGS_ENCRYPTION_KEY or "").strip():
         add("derived-encryption-key", "SETTINGS_ENCRYPTION_KEY is not set (a key is derived from SECRET_KEY).")
 
-    seed = db.query(StaffUser).filter(StaffUser.email == settings.SEED_ADMIN_EMAIL.strip().lower()).first()
+    seed = (db.query(StaffUser)
+            .filter(StaffUser.email == settings.SEED_ADMIN_EMAIL.strip().lower(),
+                    StaffUser.role == "System Admin")
+            .first())
     known_weak = [p for p in (settings.SEED_ADMIN_PASSWORD, *LEGACY_DEFAULT_ADMIN_PASSWORDS) if p and is_weak_for_admin(p)]
     if seed is not None and seed.is_active and any(verify_password(p, seed.password_hash) for p in known_weak):
         add("default-admin-password", f"The built-in admin account ({seed.email}) still has a known-weak password.")

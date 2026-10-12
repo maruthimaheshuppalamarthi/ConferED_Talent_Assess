@@ -14,7 +14,8 @@ All timestamps are timezone-aware UTC (``timestamptz`` on Postgres).
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import (JSON, Boolean, Column, DateTime, Float, ForeignKey, Index, Integer, String, Text, func, text)
+from sqlalchemy import (JSON, Boolean, Column, DateTime, Float, ForeignKey, Index, Integer, String, Text,
+                        UniqueConstraint, func, text)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.types import TypeDecorator
@@ -61,9 +62,12 @@ def new_id() -> str:
 class StaffUser(AuthBase):
     """System Admin / Recruiter / Proctor accounts (created by a System Admin)."""
     __tablename__ = "staff_users"
+    __table_args__ = (
+        UniqueConstraint("email", "role", name="uq_staff_users_email_role"),
+    )
 
     id = Column(String, primary_key=True, default=new_id)
-    email = Column(String, unique=True, nullable=False, index=True)  # login identifier (lower-case)
+    email = Column(String, nullable=False, index=True)  # login identifier (lower-case), unique per portal role
     otp_email = Column(String, nullable=False)                      # where 2FA OTPs are delivered
     full_name = Column(String, nullable=False)
     role = Column(String, nullable=False, default="Recruiter", index=True)  # System Admin | Recruiter | Proctor

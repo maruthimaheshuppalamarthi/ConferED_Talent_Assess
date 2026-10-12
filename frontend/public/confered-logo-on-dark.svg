@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 430 92" fill="none" role="img" aria-label="ConferED Capture. Transform. Engage.">
+  <g transform="translate(4,6)">
+    <rect x="2" y="2" width="26" height="54" rx="5" fill="#6F8EAE"/>
+    <path d="M7 14h16M7 24h16M7 34h16M7 44h16" stroke="#C5D6E6" stroke-width="2.2" stroke-linecap="round"/>
+    <rect x="28" y="10" width="20" height="46" rx="4.5" fill="#9FBFDA"/>
+    <path d="M32 22h12M32 32h12M32 42h12" stroke="#EAF3FA" stroke-width="2" stroke-linecap="round"/>
+    <path d="M0 64h54" stroke="#9BB4C9" stroke-width="3.2" stroke-linecap="round"/>
+  </g>
+  <text x="78" y="48" font-family="Inter, Plus Jakarta Sans, Arial, sans-serif" font-size="34" font-weight="700" fill="#C5D4E2">Confer<tspan fill="#D7E3EE">ED</tspan></text>
+  <text x="80" y="74" font-family="Inter, Plus Jakarta Sans, Arial, sans-serif" font-size="11" font-weight="600" letter-spacing="2.6" fill="#B7C4D0">CAPTURE. TRANSFORM. ENGAGE</text>
+</svg>

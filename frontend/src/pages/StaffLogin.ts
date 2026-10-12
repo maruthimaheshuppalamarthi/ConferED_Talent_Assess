@@ -90,9 +90,9 @@ export class StaffLoginPage {
     return `
       <div class="space-y-4 text-xs">
         <div>
-          <label class="block font-semibold text-slate-300 mb-1" for="login-email">Enterprise Email</label>
+          <label class="block font-semibold text-slate-300 mb-1" for="login-email">Username</label>
           <input id="login-email" type="text" autocomplete="username" value="${escapeHtml(form.email)}"
-            class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white font-mono" placeholder="you@company.com" />
+            class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white font-mono" placeholder="username" />
         </div>
         <div>
           <label class="block font-semibold text-slate-300 mb-1" for="login-password">Password</label>

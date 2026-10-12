@@ -120,11 +120,16 @@ async def websocket_proctoring_endpoint(websocket: WebSocket, token: Optional[st
                     }
                     manager.remember_chat(principal["id"], msg)
                     await manager.broadcast_to_monitors(msg)
-                elif data.get("type") == "frame":
+                elif data.get("type") in ("frame", "snapshot"):
                     image = data.get("image")
-                    if isinstance(image, str) and image.startswith("data:image/jpeg") and len(image) <= 140_000:
+                    limit = 400_000 if data.get("type") == "snapshot" else 140_000
+                    if isinstance(image, str) and image.startswith("data:image/jpeg") and len(image) <= limit:
                         await manager.broadcast_to_monitors({
-                            "type": "frame", "candidateId": principal["id"], "image": image,
+                            "type": "frame",
+                            "candidateId": principal["id"],
+                            "image": image,
+                            "snapshot": data.get("type") == "snapshot",
+                            "reason": data.get("reason"),
                         })
                 elif data.get("type") == "finished":
                     await manager.broadcast_to_monitors({

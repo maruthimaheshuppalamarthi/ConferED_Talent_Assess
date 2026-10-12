@@ -141,7 +141,7 @@ def test_jobs_own_separate_exams(client):
     job_a = backend.json()
     job_b = cloud.json()
     assert job_a["assessmentId"] != job_b["assessmentId"]
-    assert job_a["sectionCount"] == 0
+    assert job_a["sectionCount"] == 4
     assert job_b["status"] == "open"
 
     bad = client.post(f"{API}/recruiter/jobs", headers=h, json={"title": "Nope", "status": "live"})
@@ -156,7 +156,9 @@ def test_jobs_own_separate_exams(client):
     exam_a = client.get(f"{API}/recruiter/assessments/{job_a['assessmentId']}", headers=h)
     exam_b = client.get(f"{API}/recruiter/assessments/{job_b['assessmentId']}", headers=h)
     assert [s["name"] for s in exam_a.json()["sections"]] == ["MCQ"]
-    assert exam_b.json()["sections"] == []
+    assert [s["name"] for s in exam_b.json()["sections"]] == [
+        "Quantitative Aptitude", "Logical Reasoning", "English", "Technical",
+    ]
 
     renamed = client.patch(f"{API}/recruiter/jobs/{job_a['id']}", headers=h, json={
         "title": "Backend Engineer II",
@@ -444,8 +446,7 @@ def test_question_bank_assignment_shows_on_the_job(client):
     assert created.json()["jobId"] == job["id"]
 
     exam = client.get(f"{API}/recruiter/assessments/{job['assessmentId']}", headers=h).json()
-    placed = exam["sections"][0]
-    assert placed["name"] == "Technical MCQs"
+    placed = next(sec for sec in exam["sections"] if sec["name"] == "Technical MCQs")
     assert placed["questions"][0]["title"] == "Assigned from the bank"
     assert placed["questions"][0]["sectionCategory"] == "Assign View"
 
@@ -574,3 +575,50 @@ def test_two_candidates_see_different_frozen_papers(client):
 
     removed = client.delete(f"{API}/recruiter/jobs/{job['id']}", headers=h)
     assert removed.status_code == 409
+
+
+def test_job_bank_questions_appear_on_candidate_paper(client):
+    from urllib.parse import parse_qs, urlparse
+
+    admin = _admin(client)
+    _, token = recruiter_token(client, admin, "papersee")
+    h = auth(token)
+    job = client.post(f"{API}/recruiter/jobs", headers=h, json={
+        "title": "Visible Paper", "status": "open",
+    }).json()
+    names = ["Quantitative Aptitude", "Logical Reasoning", "English", "Technical"]
+    for name in names:
+        created = client.post(f"{API}/recruiter/jobs/{job['id']}/questions", headers=h, json={
+            "type": "mcq", "title": f"{name} Q", "content": f"Stem {name}",
+            "sectionCategory": name, "difficulty": "easy", "points": 5,
+            "options": [{"id": "a", "text": "No"}, {"id": "b", "text": "Yes"}],
+            "correctAnswers": ["b"],
+        })
+        assert created.status_code == 201, created.text
+
+    exam = client.get(f"{API}/recruiter/assessments/{job['assessmentId']}", headers=h).json()
+    assert [sec["name"] for sec in exam["sections"]] == names
+    for sec in exam["sections"]:
+        assert [q["title"] for q in sec["questions"]] == [f"{sec['name']} Q"]
+
+    inv = client.post(f"{API}/recruiter/candidates/invites", headers=h, json={
+        "name": "See Paper", "email": "see.paper@example.com",
+        "assessmentId": job["assessmentId"], "expiresInHours": 24,
+    })
+    assert inv.status_code == 201, inv.text
+    invite_token = parse_qs(urlparse(inv.json()["link"]).query)["invite"][0]
+    verified = client.post(f"{API}/candidate/verify", json={
+        "inviteToken": invite_token, "otp": inv.json()["devOtp"],
+    })
+    assert verified.status_code == 200, verified.text
+    paper = client.get(
+        f"{API}/candidate/assessment",
+        headers=auth(verified.json()["accessToken"]),
+    )
+    assert paper.status_code == 200, paper.text
+    sections = paper.json()["sections"]
+    assert [sec["name"] for sec in sections] == names
+    for sec in sections:
+        assert len(sec["questions"]) == 1
+        assert sec["questions"][0]["title"] == f"{sec['name']} Q"
+        assert "correctAnswers" not in sec["questions"][0]
