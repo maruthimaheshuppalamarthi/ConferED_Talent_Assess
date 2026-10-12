@@ -1,5 +1,6 @@
 name: Deploy production
 
+# Tests, version check, image build, and EC2 deploy run only after a merge to main.
 on:
   push:
     branches: [main]
