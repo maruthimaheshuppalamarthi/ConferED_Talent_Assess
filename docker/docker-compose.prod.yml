@@ -1,0 +1,27 @@
+# Production API only. Database is Supabase (AUTH_DATABASE_URL in backend/.env).
+# Do not use docker/docker-compose.yml here — that file is local Postgres + Redis + a fake SECRET_KEY.
+#
+# IMAGE_TAG is the git SHA. ECR_REPOSITORY is account.dkr.ecr.region.amazonaws.com/confered-api
+name: confered
+
+services:
+  api:
+    image: ${ECR_REPOSITORY}:${IMAGE_TAG}
+    container_name: confered-api
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"
+    env_file:
+      - ../backend/.env
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import socket; socket.create_connection(('127.0.0.1', 8000), 2).close()",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s

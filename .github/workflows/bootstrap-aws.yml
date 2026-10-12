@@ -1,0 +1,32 @@
+name: Bootstrap AWS ECR
+
+# One-time: create ECR + GitHub OIDC role. Needs temporary AWS admin access keys
+# in repository secrets AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY. Delete those
+# keys after this job succeeds and keep AWS_ROLE_TO_ASSUME + ECR_REPOSITORY instead.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'ap-south-1' }}
+      GITHUB_REPO: ${{ github.repository }}
+      INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Create ECR repository and IAM OIDC role
+        run: |
+          chmod +x scripts/aws/bootstrap-ecr-oidc.sh
+          bash scripts/aws/bootstrap-ecr-oidc.sh
