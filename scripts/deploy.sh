@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Production deploy on the EC2 box. GitHub Actions SSHs in and runs this after main is updated.
+# Production deploy on the EC2 box. GitHub Actions SSHs in and runs this.
+# Resets to origin/main so leftover server edits cannot block the pull.
 set -euo pipefail
 
 APP_DIR="${APP_DIR:-/home/ubuntu/ConferED_Talent_Assess}"
@@ -7,8 +8,9 @@ WEB_ROOT="${WEB_ROOT:-/var/www/confered}"
 cd "$APP_DIR"
 
 git fetch origin
-git checkout main
-git pull --ff-only origin main
+git checkout -f main
+git reset --hard origin/main
+git clean -fd
 
 cd "$APP_DIR/backend"
 # shellcheck disable=SC1091
