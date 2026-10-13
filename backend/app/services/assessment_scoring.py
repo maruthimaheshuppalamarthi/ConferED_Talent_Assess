@@ -9,6 +9,7 @@ from app.models.auth import (
     Assessment, AssessmentSection, AssessmentSectionQuestion, Candidate,
     CandidateInvite, CandidateResult, InviteBatchRow, Question, new_id, utcnow,
 )
+from app.services import code_exec, sql_exec
 
 
 def question_for_candidate(q: Question, option_ids: Optional[List[str]] = None) -> Dict[str, Any]:
@@ -112,6 +113,82 @@ def _grade_objective(q: Question, answer: Any) -> Tuple[float, float]:
     return 0.0, max_pts
 
 
+def _grade_coding(q: Question, answer: Any) -> Tuple[float, float]:
+    """Grade programming solution against test cases."""
+    max_pts = float(q.points or 0)
+    if not answer:
+        return 0.0, max_pts
+
+    if isinstance(answer, dict):
+        code = str(answer.get("code") or "")
+        language = str(answer.get("language") or q.language or "python")
+    else:
+        code = str(answer or "")
+        language = str(q.language or "python")
+
+    if not code.strip():
+        return 0.0, max_pts
+
+    test_cases = q.test_cases or []
+    res = code_exec.execute(language, code, test_cases)
+    test_results = res.get("testResults") or []
+    if not test_results:
+        return (max_pts if res.get("passed") else 0.0), max_pts
+
+    total_weight = sum(float(tc.get("weight", 1)) for tc in test_cases) or float(len(test_results))
+    passed_weight = 0.0
+    for idx, r in enumerate(test_results):
+        tc_def = test_cases[idx] if idx < len(test_cases) else {}
+        w = float(tc_def.get("weight", 1))
+        if r.get("passed"):
+            passed_weight += w
+
+    ratio = min(1.0, max(0.0, passed_weight / total_weight)) if total_weight > 0 else 0.0
+    return round(max_pts * ratio, 2), max_pts
+
+
+def _grade_sql(q: Question, answer: Any) -> Tuple[float, float]:
+    """Grade SQL query against SQLite test cases."""
+    max_pts = float(q.points or 0)
+    if not answer:
+        return 0.0, max_pts
+
+    if isinstance(answer, dict):
+        code = str(answer.get("code") or answer.get("sql") or "")
+    else:
+        code = str(answer or "")
+
+    if not code.strip():
+        return 0.0, max_pts
+
+    correct = (q.correct_answers or [None])[0] if q.correct_answers else None
+    res = sql_exec.execute_sql(code, q.test_cases or [], correct)
+    test_results = res.get("testResults") or []
+    if not test_results:
+        return (max_pts if res.get("passed") else 0.0), max_pts
+
+    passed_count = sum(1 for r in test_results if r.get("passed"))
+    ratio = passed_count / len(test_results)
+    return round(max_pts * ratio, 2), max_pts
+
+
+def _grade_essay(q: Question, answer: Any) -> Tuple[float, float, Dict[str, Any]]:
+    """Grade written essay using the AI Evaluation Engine."""
+    from app.services import ai_evaluator
+    max_pts = float(q.points or 0)
+    text = str(answer or "").strip() if not isinstance(answer, dict) else str(answer.get("text") or answer.get("content") or "").strip()
+    result = ai_evaluator.evaluate_essay(
+        question_content=q.content or q.title,
+        candidate_essay=text,
+        points=max_pts,
+        min_words=q.essay_min_words,
+        max_words=q.essay_max_words,
+        rubric=q.rubric or "",
+        tags=q.tags or [],
+    )
+    return result["score"], max_pts, result
+
+
 def grade_submission(
     db: Session,
     *,
@@ -128,6 +205,7 @@ def grade_submission(
     )
 
     section_scores: Dict[str, Any] = {}
+    question_evaluations: Dict[str, Any] = {}
     total = 0.0
     max_total = 0.0
 
@@ -153,18 +231,28 @@ def grade_submission(
                 continue
             if q.type in ("mcq", "msq", "drag_drop"):
                 s, m = _grade_objective(q, answers.get(qid))
+            elif q.type == "coding":
+                s, m = _grade_coding(q, answers.get(qid))
+            elif q.type == "sql":
+                s, m = _grade_sql(q, answers.get(qid))
+            elif q.type == "essay":
+                s, m, ai_eval = _grade_essay(q, answers.get(qid))
+                if ai_eval:
+                    question_evaluations[qid] = ai_eval
             else:
-                # coding/sql/essay: leave for manual/auto later — count toward max only if answered
                 m = float(q.points or 0)
                 s = 0.0
-                if answers.get(qid):
-                    s = 0.0  # pending review
             sec_score += s
             sec_max += m
         total += sec_score
         max_total += sec_max
         pct = round((sec_score / sec_max) * 100, 1) if sec_max else 0.0
         section_scores[sec.name] = {"score": round(sec_score, 2), "maxScore": round(sec_max, 2), "percentage": pct}
+
+    if question_evaluations:
+        section_scores["_aiEvaluations"] = question_evaluations
+    if answers:
+        section_scores["_submittedAnswers"] = answers
 
     percentage = round((total / max_total) * 100, 1) if max_total else 0.0
     passing = assessment.passing_percentage if assessment else 70
@@ -182,7 +270,7 @@ def grade_submission(
         section_scores=section_scores,
         ai_confidence_score=95.0,
         total_violations=0,
-        recruiter_notes="Auto-scored objective questions. Coding/essay pending review.",
+        recruiter_notes="Auto-scored: Objective, Coding, SQL, and Essay questions evaluated successfully.",
         recruiter_decision="Under Review",
     )
     db.add(result)

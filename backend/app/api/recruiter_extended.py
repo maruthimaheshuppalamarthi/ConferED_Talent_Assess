@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import require_portal
 from app.core.roles import PORTAL_RECRUITER
 from app.db.session import get_db
-from app.models.auth import StaffUser
+from app.models.auth import StaffUser, SystemSetting, utcnow
 from app.services import audit
 from app.services import bulk_invite
 from app.services import question_bank
@@ -282,3 +282,158 @@ def post_section_questions(
         target_type="assessment_section", target_id=section_id,
         summary=f"{actor.email} attached {len(body.questionIds)} question(s) to section {section_id}")
     return out
+
+
+# ----------------------------------------------------------------- Question Bank Folders
+class QuestionBankBody(BaseModel):
+    name: str
+    description: Optional[str] = ""
+    jobId: Optional[str] = None
+    jobTitle: Optional[str] = None
+    badgeTone: Optional[str] = None
+
+
+DEFAULT_DEFAULT_BANK = {
+    "id": "qb-default",
+    "name": "Default Question Bank",
+    "description": "Default repository containing all questions, MCQs, and coding challenges across all jobs.",
+    "jobId": None,
+    "jobTitle": None,
+    "badgeTone": "from-blue-600 to-indigo-600",
+    "isDefault": True,
+}
+
+DEFAULT_QUESTION_BANKS = [
+    DEFAULT_DEFAULT_BANK,
+]
+
+
+def _get_or_init_banks(db: Session) -> tuple:
+    row = db.query(SystemSetting).filter(SystemSetting.key == "recruiter_question_banks").first()
+    if not row:
+        row = SystemSetting(
+            key="recruiter_question_banks",
+            group="assessment",
+            value=DEFAULT_QUESTION_BANKS,
+            value_type="json",
+            description="Recruiter defined question bank folders",
+        )
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+    banks = row.value if isinstance(row.value, list) else list(DEFAULT_QUESTION_BANKS)
+    # Ensure qb-default exists and cannot be removed
+    has_default = any(b.get("id") == "qb-default" or b.get("isDefault") for b in banks)
+    if not has_default:
+        banks = [DEFAULT_DEFAULT_BANK] + [b for b in banks if b.get("id") != "qb-default"]
+        row.value = banks
+        db.commit()
+    else:
+        # Lock qb-default name and isDefault flag
+        modified = False
+        for b in banks:
+            if b.get("id") == "qb-default":
+                if not b.get("isDefault") or b.get("name") != "Default Question Bank":
+                    b["isDefault"] = True
+                    b["name"] = "Default Question Bank"
+                    modified = True
+        if modified:
+            row.value = banks
+            db.commit()
+    return row, banks
+
+
+@router.get("/question-banks")
+def get_question_banks(
+    actor: StaffUser = Depends(require_portal(PORTAL_RECRUITER)),
+    db: Session = Depends(get_db),
+):
+    _, banks = _get_or_init_banks(db)
+    return {"items": banks}
+
+
+@router.post("/question-banks", status_code=status.HTTP_201_CREATED)
+def create_question_bank(
+    body: QuestionBankBody,
+    request: Request,
+    actor: StaffUser = Depends(require_portal(PORTAL_RECRUITER)),
+    db: Session = Depends(get_db),
+):
+    row, banks = _get_or_init_banks(db)
+    new_id = f"qb-{int(utcnow().timestamp() * 1000)}"
+    item = {
+        "id": new_id,
+        "name": body.name.strip(),
+        "description": (body.description or "").strip(),
+        "jobId": body.jobId,
+        "jobTitle": body.jobTitle,
+        "badgeTone": body.badgeTone or "from-blue-600 to-indigo-600",
+        "createdAt": utcnow().isoformat(),
+        "isDefault": False,
+    }
+    updated = list(banks) + [item]
+    row.value = updated
+    db.commit()
+    audit.record_audit(
+        db, category=audit.CAT_CANDIDATE, action="question_bank.create", actor=actor, request=request,
+        target_type="question_bank", target_id=new_id,
+        summary=f"{actor.email} created Question Bank '{item['name']}'")
+    return item
+
+
+@router.put("/question-banks/{bank_id}")
+def update_question_bank(
+    bank_id: str,
+    body: QuestionBankBody,
+    request: Request,
+    actor: StaffUser = Depends(require_portal(PORTAL_RECRUITER)),
+    db: Session = Depends(get_db),
+):
+    row, banks = _get_or_init_banks(db)
+    found = False
+    updated = []
+    ret_item = None
+    for b in banks:
+        if b.get("id") == bank_id:
+            found = True
+            is_def = bool(b.get("isDefault") or bank_id == "qb-default")
+            b = {
+                **b,
+                # Default question bank cannot be renamed
+                "name": b.get("name") if is_def else (body.name.strip() if body.name else b.get("name")),
+                "description": body.description if body.description is not None else b.get("description"),
+                "jobId": body.jobId if body.jobId is not None else b.get("jobId"),
+                "jobTitle": body.jobTitle if body.jobTitle is not None else b.get("jobTitle"),
+                "isDefault": is_def,
+            }
+            ret_item = b
+        updated.append(b)
+    if not found:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Question Bank folder not found")
+    row.value = updated
+    db.commit()
+    return ret_item
+
+
+@router.delete("/question-banks/{bank_id}")
+def delete_question_bank(
+    bank_id: str,
+    request: Request,
+    actor: StaffUser = Depends(require_portal(PORTAL_RECRUITER)),
+    db: Session = Depends(get_db),
+):
+    row, banks = _get_or_init_banks(db)
+    for b in banks:
+        if b.get("id") == bank_id and (b.get("isDefault") or bank_id == "qb-default"):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Default Question Bank cannot be deleted.")
+    updated = [b for b in banks if b.get("id") != bank_id]
+    if not updated:
+        updated = list(DEFAULT_QUESTION_BANKS)
+    row.value = updated
+    db.commit()
+    audit.record_audit(
+        db, category=audit.CAT_CANDIDATE, action="question_bank.delete", actor=actor, request=request,
+        target_type="question_bank", target_id=bank_id,
+        summary=f"{actor.email} deleted Question Bank {bank_id}")
+    return {"ok": True}
+

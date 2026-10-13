@@ -99,7 +99,7 @@ def build_staff_auth_router(portal: str) -> APIRouter:
             raise HTTPException(status_code=400, detail="Unknown verification session. Start again.")
 
         new_challenge, code = issue_otp(db, purpose, user.id)
-        subject, body = email_service.staff_login_otp_email(code, rt.get_int("otpExpireMinutes"))
+        subject, body = email_service.staff_login_otp_email(code, rt.get_int("otpExpireMinutes"), name=user.full_name)
         email_service.dispatch_otp_email(user.otp_email, subject, body)
         core.log_dev_otp(f"{portal} resend {user.email}", code)
         return core.challenge_out(new_challenge, user.otp_email, code)

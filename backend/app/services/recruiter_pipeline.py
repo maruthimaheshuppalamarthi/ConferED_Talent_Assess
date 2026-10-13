@@ -117,42 +117,76 @@ def stage_counts(db: Session) -> Dict[str, int]:
     }
 
 
-def list_pipeline(db: Session, status: Optional[str] = None) -> Tuple[List[Dict[str, Any]], int]:
+def list_pipeline(db: Session, status: Optional[str] = None, job_id: Optional[str] = None) -> Tuple[List[Dict[str, Any]], int]:
     q = db.query(Candidate).order_by(Candidate.created_at.desc(), Candidate.name.asc())
     if status:
         q = q.filter(Candidate.status == status)
+    if job_id:
+        job = db.query(Job).filter(Job.id == job_id).first()
+        if job:
+            q = q.filter((Candidate.assessment_id == job.assessment_id) | (Candidate.role_title == job.title))
     cands = q.all()
     results = _results_map(db, [c.id for c in cands])
-    items = [candidate_row(c, results.get(c.id)) for c in cands]
+
+    aids = list({c.assessment_id for c in cands if c.assessment_id})
+    job_titles: Dict[str, str] = {}
+    if aids:
+        for aid, title in db.query(Job.assessment_id, Job.title).filter(Job.assessment_id.in_(aids)).all():
+            job_titles[aid] = title
+        for aid, title in db.query(Assessment.id, Assessment.title).filter(Assessment.id.in_(aids)).all():
+            if aid not in job_titles:
+                job_titles[aid] = title
+
+    items = []
+    for c in cands:
+        row = candidate_row(c, results.get(c.id))
+        if not row.get("roleTitle") and c.assessment_id and c.assessment_id in job_titles:
+            row["roleTitle"] = job_titles[c.assessment_id]
+        items.append(row)
     return items, len(items)
 
 
 def paper_for_candidate(db: Session, cand: Candidate) -> Optional[List[Dict[str, Any]]]:
     """The question and option order this candidate was shown."""
-    if not cand.assessment_id:
+    aid = cand.assessment_id
+    if not aid:
+        inv = db.query(CandidateInvite).filter(CandidateInvite.candidate_id == cand.id).first()
+        if inv and inv.assessment_id:
+            aid = inv.assessment_id
+    if not aid:
         return None
+
     session = (
         db.query(AssessmentSession)
         .filter(
             AssessmentSession.candidate_id == cand.id,
-            AssessmentSession.assessment_id == cand.assessment_id,
+            AssessmentSession.assessment_id == aid,
         )
         .order_by(AssessmentSession.created_at.desc())
         .first()
     )
-    if not session or not session.drawn_question_ids:
-        return None
-    drawn = session.drawn_question_ids or {}
-    option_order = session.option_order or {}
+    result = db.query(CandidateResult).filter(CandidateResult.candidate_id == cand.id).first()
+    submitted_from_result = {}
+    if result and result.section_scores and isinstance(result.section_scores, dict):
+        submitted_from_result = result.section_scores.get("_submittedAnswers") or {}
+
+    drawn = (session.drawn_question_ids or {}) if session else {}
+    option_order = (session.option_order or {}) if session else {}
+    prog = (session.progress or {}) if session else {}
+    cand_answers = dict(prog.get("answers") or {})
+    if not cand_answers and submitted_from_result:
+        cand_answers = dict(submitted_from_result)
+    code_drafts = dict(prog.get("codeDrafts") or {})
+
     sections = (
         db.query(AssessmentSection)
-        .filter(AssessmentSection.assessment_id == cand.assessment_id)
+        .filter(AssessmentSection.assessment_id == aid)
         .order_by(AssessmentSection.sort_order.asc())
         .all()
     )
     paper: List[Dict[str, Any]] = []
     for section in sections:
-        qids = drawn.get(section.id) or []
+        qids = drawn.get(section.id) or _section_question_ids(db, section) or []
         questions = db.query(Question).filter(Question.id.in_(qids)).all() if qids else []
         by_id = {q.id: q for q in questions}
         items = []
@@ -162,20 +196,47 @@ def paper_for_candidate(db: Session, cand: Candidate) -> Optional[List[Dict[str,
                 continue
             opts = []
             by_opt = {}
-            for opt in question.options or []:
-                if isinstance(opt, dict) and opt.get("id"):
-                    by_opt[str(opt["id"])] = opt.get("text") or ""
+            for idx, opt in enumerate(question.options or []):
+                if isinstance(opt, dict):
+                    oid = str(opt.get("id") or f"opt-{idx+1}")
+                    by_opt[oid] = opt.get("text") or ""
+                elif isinstance(opt, str):
+                    oid = f"opt-{idx+1}"
+                    by_opt[oid] = opt
             correct = {str(cid) for cid in (question.correct_answers or [])}
-            order = option_order.get(qid) or list(by_opt.keys())
+            order = (option_order.get(qid) if option_order else None) or list(by_opt.keys())
+            if not order:
+                order = list(by_opt.keys())
             for oid in order:
                 if oid in by_opt:
                     opts.append({"id": oid, "text": by_opt[oid], "correct": oid in correct})
+            for oid, text in by_opt.items():
+                if not any(o["id"] == oid for o in opts):
+                    opts.append({"id": oid, "text": text, "correct": oid in correct})
+
+            ans = cand_answers.get(qid)
+            if ans is None and qid in code_drafts:
+                draft = code_drafts[qid]
+                if isinstance(draft, dict):
+                    lang = draft.get("language")
+                    files = draft.get("files") or {}
+                    ans = {"code": files.get(lang, ""), "language": lang}
+
             items.append({
                 "number": number,
                 "id": question.id,
                 "type": question.type,
                 "title": question.title,
+                "content": question.content or question.title,
+                "points": question.points or 10,
+                "explanation": question.explanation or "",
                 "options": opts,
+                "candidateAnswer": ans,
+                "correctAnswers": [str(c) for c in (question.correct_answers or [])],
+                "sampleCode": question.sample_code,
+                "language": question.language,
+                "difficulty": question.difficulty or "medium",
+                "testCases": question.test_cases,
             })
         if items:
             paper.append({"id": section.id, "name": section.name, "questions": items})
@@ -207,6 +268,14 @@ def get_candidate_detail(db: Session, candidate_id: str) -> Optional[Dict[str, A
         }
     else:
         row["result"] = None
+    if not row.get("roleTitle") and cand.assessment_id:
+        job = db.query(Job).filter(Job.assessment_id == cand.assessment_id).first()
+        if job:
+            row["roleTitle"] = job.title
+        else:
+            assessment = db.query(Assessment).filter(Assessment.id == cand.assessment_id).first()
+            if assessment:
+                row["roleTitle"] = assessment.role_title or assessment.title
     row["paper"] = paper_for_candidate(db, cand)
     return row
 
@@ -515,6 +584,10 @@ def job_out(db: Session, job: Job) -> Dict[str, Any]:
         .filter(AssessmentSection.assessment_id == job.assessment_id)
         .count()
     )
+    assessment = db.query(Assessment).filter(Assessment.id == job.assessment_id).first()
+    total_dur = getattr(job, "total_duration_minutes", None) or (assessment.total_duration_minutes if assessment else 60)
+    sched_date = getattr(job, "scheduled_date", None) or (assessment.scheduled_date if assessment else None)
+    sched_time = getattr(job, "start_time", None) or (assessment.start_time if assessment else None)
     return {
         "id": job.id,
         "title": job.title,
@@ -522,6 +595,9 @@ def job_out(db: Session, job: Job) -> Dict[str, Any]:
         "status": job.status,
         "assessmentId": job.assessment_id,
         "sectionCount": section_count,
+        "totalDurationMinutes": total_dur,
+        "scheduledDate": sched_date,
+        "startTime": sched_time,
         "createdAt": job.created_at.isoformat() if job.created_at else None,
     }
 
@@ -545,6 +621,9 @@ def ensure_jobs_for_assessments(db: Session) -> None:
             description=assessment.description or "",
             status=status,
             assessment_id=assessment.id,
+            total_duration_minutes=assessment.total_duration_minutes or 60,
+            scheduled_date=getattr(assessment, "scheduled_date", None),
+            start_time=getattr(assessment, "start_time", None),
         ))
     db.commit()
 
@@ -566,12 +645,19 @@ def create_job(db: Session, body: Dict[str, Any]) -> Dict[str, Any]:
     status = _job_status(body.get("status"))
     description = (body.get("description") or "").strip()
     assessment_id = new_id()
+    total_duration = int(body.get("totalDurationMinutes") or 60)
+    scheduled_date = (body.get("scheduledDate") or "").strip() or None
+    if scheduled_date and scheduled_date < utcnow().date().isoformat():
+        raise ValueError("Assessment date cannot be in the past. Please select today or a future date.")
+    start_time = (body.get("startTime") or "").strip() or None
     db.add(Assessment(
         id=assessment_id,
         title=title,
         role_title=title,
         description=description,
-        total_duration_minutes=int(body.get("totalDurationMinutes") or 60),
+        total_duration_minutes=total_duration,
+        scheduled_date=scheduled_date,
+        start_time=start_time,
         total_questions=0,
         passing_percentage=int(body.get("passingPercentage") or 70),
         status=_ASSESSMENT_STATUS[status],
@@ -583,6 +669,9 @@ def create_job(db: Session, body: Dict[str, Any]) -> Dict[str, Any]:
         description=description,
         status=status,
         assessment_id=assessment_id,
+        total_duration_minutes=total_duration,
+        scheduled_date=scheduled_date,
+        start_time=start_time,
     )
     db.add(job)
     db.flush()
@@ -602,6 +691,15 @@ def update_job(db: Session, job: Job, body: Dict[str, Any]) -> Dict[str, Any]:
         job.description = body["description"].strip()
     if "status" in body and body["status"] is not None:
         job.status = _job_status(body["status"], default=job.status)
+    if "totalDurationMinutes" in body and body["totalDurationMinutes"] is not None:
+        job.total_duration_minutes = int(body["totalDurationMinutes"])
+    if "scheduledDate" in body:
+        s_date = (body["scheduledDate"] or "").strip() or None
+        if s_date and s_date < utcnow().date().isoformat():
+            raise ValueError("Assessment date cannot be in the past. Please select today or a future date.")
+        job.scheduled_date = s_date
+    if "startTime" in body:
+        job.start_time = (body["startTime"] or "").strip() or None
     job.updated_at = utcnow()
 
     assessment = db.query(Assessment).filter(Assessment.id == job.assessment_id).first()
@@ -610,6 +708,12 @@ def update_job(db: Session, job: Job, body: Dict[str, Any]) -> Dict[str, Any]:
         assessment.role_title = job.title
         assessment.description = job.description or ""
         assessment.status = _ASSESSMENT_STATUS[job.status]
+        if "totalDurationMinutes" in body and body["totalDurationMinutes"] is not None:
+            assessment.total_duration_minutes = int(body["totalDurationMinutes"])
+        if "scheduledDate" in body:
+            assessment.scheduled_date = job.scheduled_date
+        if "startTime" in body:
+            assessment.start_time = job.start_time
         assessment.updated_at = utcnow()
     db.commit()
     db.refresh(job)
@@ -696,6 +800,8 @@ def assessment_out(db: Session, a: Assessment) -> Dict[str, Any]:
         "roleTitle": a.role_title,
         "description": a.description or "",
         "totalDurationMinutes": a.total_duration_minutes,
+        "scheduledDate": getattr(a, "scheduled_date", None),
+        "startTime": getattr(a, "start_time", None),
         "totalQuestions": a.total_questions,
         "passingPercentage": a.passing_percentage,
         "status": a.status,
@@ -715,12 +821,19 @@ def get_assessment(db: Session, aid: str) -> Optional[Assessment]:
 def create_assessment(db: Session, body: Dict[str, Any]) -> Dict[str, Any]:
     aid = body.get("id") or new_id()
     sections = body.get("sections") or []
+    total_dur = int(body.get("totalDurationMinutes") or 60)
+    scheduled_date = (body.get("scheduledDate") or "").strip() or None
+    if scheduled_date and scheduled_date < utcnow().date().isoformat():
+        raise ValueError("Assessment date cannot be in the past. Please select today or a future date.")
+    start_time = (body.get("startTime") or "").strip() or None
     a = Assessment(
         id=aid,
         title=body["title"],
         role_title=body.get("roleTitle") or body["title"],
         description=body.get("description") or "",
-        total_duration_minutes=int(body.get("totalDurationMinutes") or 60),
+        total_duration_minutes=total_dur,
+        scheduled_date=scheduled_date,
+        start_time=start_time,
         total_questions=int(body.get("totalQuestions") or sum(len(s.get("questions") or []) for s in sections)),
         passing_percentage=int(body.get("passingPercentage") or 70),
         status=body.get("status") or "draft",
@@ -760,11 +873,28 @@ def update_assessment(db: Session, a: Assessment, body: Dict[str, Any]) -> Dict[
         a.description = body["description"]
     if "totalDurationMinutes" in body and body["totalDurationMinutes"] is not None:
         a.total_duration_minutes = int(body["totalDurationMinutes"])
+    if "scheduledDate" in body:
+        s_date = (body["scheduledDate"] or "").strip() or None
+        if s_date and s_date < utcnow().date().isoformat():
+            raise ValueError("Assessment date cannot be in the past. Please select today or a future date.")
+        a.scheduled_date = s_date
+    if "startTime" in body:
+        a.start_time = (body["startTime"] or "").strip() or None
     if "passingPercentage" in body and body["passingPercentage"] is not None:
         a.passing_percentage = int(body["passingPercentage"])
     if "status" in body and body["status"] is not None:
         a.status = body["status"]
     a.updated_at = utcnow()
+
+    job = db.query(Job).filter(Job.assessment_id == a.id).first()
+    if job:
+        if "totalDurationMinutes" in body and body["totalDurationMinutes"] is not None:
+            job.total_duration_minutes = a.total_duration_minutes
+        if "scheduledDate" in body:
+            job.scheduled_date = a.scheduled_date
+        if "startTime" in body:
+            job.start_time = a.start_time
+        job.updated_at = utcnow()
 
     if "sections" in body and body["sections"] is not None:
         old_ids = [s.id for s in db.query(AssessmentSection).filter(AssessmentSection.assessment_id == a.id).all()]

@@ -96,14 +96,16 @@ def test_same_username_on_each_portal_is_looked_up_from_the_database(client):
     with SessionLocal() as db:
         for role, name in (("System Admin", "Seed Admin"), ("Recruiter", "Seed Recruiter"),
                            ("Proctor", "Seed Proctor")):
-            db.add(StaffUser(
-                email="admin", otp_email="platform@example.test", full_name=name, role=role,
-                password_hash=hash_password("admin"), must_change_password=False,
-            ))
+            existing = db.query(StaffUser).filter(StaffUser.email == "shared_user", StaffUser.role == role).first()
+            if not existing:
+                db.add(StaffUser(
+                    email="shared_user", otp_email="platform@example.test", full_name=name, role=role,
+                    password_hash=hash_password("sharedpass123"), must_change_password=False,
+                ))
         db.commit()
 
     for portal in ("admin", "recruiter", "proctor"):
-        assert login_step1(client, portal, "admin", "admin").status_code == 200
+        assert login_step1(client, portal, "shared_user", "sharedpass123").status_code == 200
     assert login_step1(client, "recruiter", ADMIN["email"], ADMIN["password"]).status_code == 401
 
 

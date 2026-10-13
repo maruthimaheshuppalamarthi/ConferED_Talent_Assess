@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import authenticate_websocket, require_portal
 from app.core.roles import PORTAL_PROCTOR, can_access_portal
 from app.db.session import SessionLocal, get_db
-from app.models.auth import Assessment, AssessmentSection, AssessmentSession, Candidate, utcnow
+from app.models.auth import Assessment, AssessmentSection, AssessmentSession, Candidate, CandidateResult, Job, utcnow
 from app.services.exam_timing import exam_time_left
 from app.services import identity_bucket
 
@@ -263,29 +263,79 @@ def identity_queue(_: object = Depends(_proctor), db: Session = Depends(get_db))
 
 @desk.get("/live")
 def live_sessions(_: object = Depends(_proctor), db: Session = Depends(get_db)):
-    """Admitted candidates for the live monitoring grid."""
-    rows = (
+    """Admitted candidates for the live monitoring grid (actively taking or admitted to take the exam)."""
+    # Exclude candidates who have already finished/submitted their assessment
+    completed_cand_ids = set()
+    for (cid,) in db.query(CandidateResult.candidate_id).all():
+        completed_cand_ids.add(cid)
+    for (cid,) in db.query(AssessmentSession.candidate_id).filter(AssessmentSession.completed_at.isnot(None)).all():
+        completed_cand_ids.add(cid)
+
+    query = (
         db.query(Candidate)
-        .filter(Candidate.identity_status == "approved", Candidate.feedback_at.is_(None))
-        .order_by(Candidate.updated_at.desc())
-        .limit(50)
-        .all()
+        .filter(
+            Candidate.identity_status == "approved",
+            Candidate.assessment_completed.isnot(True),
+            Candidate.status.notin_(["Completed", "Selected", "Rejected"]),
+            Candidate.feedback_at.is_(None),
+        )
     )
+    if completed_cand_ids:
+        query = query.filter(Candidate.id.notin_(completed_cand_ids))
+
+    rows = query.order_by(Candidate.updated_at.desc()).limit(100).all()
+
+    # Pre-map jobs by assessment_id
+    job_map = {}
+    all_jobs = db.query(Job).all()
+    for j in all_jobs:
+        if j.assessment_id:
+            job_map[j.assessment_id] = j
+
     items = []
     for cand in rows:
         exam = _exam_for(db, cand)
         clock = _exam_clock(db, cand, exam)
+
+        # If the exam was started and time expired, exam has ended -> do not show in live monitor
+        if clock["examStarted"] and clock["timeLeftSeconds"] <= 0:
+            continue
+
+        job = job_map.get(cand.assessment_id) if cand.assessment_id else None
+        job_id = job.id if job else (exam.id if exam else "")
+        job_title = job.title if job else (exam.title if exam else "General Assessment")
+
         items.append({
             "id": cand.id,
             "name": cand.name,
             "email": cand.email,
             "examTitle": exam.title if exam else "",
+            "jobId": job_id,
+            "jobTitle": job_title,
             "timeLeftSeconds": clock["timeLeftSeconds"],
             "examStarted": clock["examStarted"],
             "violations": manager.violations.get(cand.id, 0),
             "lastEvent": manager.last_event.get(cand.id, ""),
         })
-    return {"items": items}
+
+    # Collect available jobs for filtering
+    jobs_summary = []
+    seen_jobs = {}
+    for item in items:
+        jid = item["jobId"]
+        jtitle = item["jobTitle"]
+        if jid not in seen_jobs:
+            seen_jobs[jid] = {"id": jid, "title": jtitle, "count": 0}
+        seen_jobs[jid]["count"] += 1
+
+    # Also include other active jobs from database with 0 count so proctor can see tabs for all jobs
+    for j in all_jobs:
+        if j.id not in seen_jobs:
+            seen_jobs[j.id] = {"id": j.id, "title": j.title, "count": 0}
+
+    jobs_summary = sorted(list(seen_jobs.values()), key=lambda x: (-x["count"], x["title"]))
+
+    return {"items": items, "jobs": jobs_summary}
 
 
 @desk.get("/identity/{candidate_id}/photo.jpg")

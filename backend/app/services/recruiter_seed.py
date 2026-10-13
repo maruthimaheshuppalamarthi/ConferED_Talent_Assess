@@ -6,6 +6,7 @@ from typing import Any, Dict, List
 
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.models.auth import (
     Assessment, AssessmentSection, AssessmentSectionQuestion, Candidate,
     CandidateResult, Job, Question, new_id, utcnow,
@@ -147,6 +148,8 @@ RESULTS = [
 
 def seed_recruiter_demo(db: Session) -> bool:
     """Insert demo hiring data once. Returns True when seed ran."""
+    if not getattr(settings, "SEED_DEMO_DATA", False):
+        return False
     if db.query(Candidate.id).first() is not None:
         return False
 

@@ -104,11 +104,10 @@ def send_test_email(req: EmailTestRequest, request: Request,
     _last_email_test[actor.id] = now
 
     cfg = rt.email_config()
-    platform = rt.get_str("platformName")
+    platform = rt.get_str("platformName") or "ConferEd Talent Assess"
+    test_subject, test_body = email_service.test_email(platform, cfg.host, cfg.port)
     ok, message = email_service.send_email_detailed(
-        recipient, f"{platform}: test email",
-        f"<p>This is a test email from <b>{platform}</b>.</p>"
-        f"<p>If you can read this, the email gateway ({cfg.host}:{cfg.port}) is working.</p>")
+        recipient, test_subject, test_body)
 
     audit.record_audit(
         db, category=audit.CAT_SETTINGS, action="settings.email_test", actor=actor, request=request, success=ok,

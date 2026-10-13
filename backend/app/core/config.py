@@ -121,6 +121,7 @@ class Settings:
     SEED_PROCTOR_EMAIL: str = os.getenv("SEED_PROCTOR_EMAIL", "")
     SEED_PROCTOR_PASSWORD: str = os.getenv("SEED_PROCTOR_PASSWORD", "")
     SEED_PROCTOR_NAME: str = os.getenv("SEED_PROCTOR_NAME", "Proctor")
+    SEED_DEMO_DATA: bool = _bool("SEED_DEMO_DATA", False)
 
     # Auth database (SQLite for local tests; Supabase Postgres via AUTH_DATABASE_URL)
     AUTH_DATABASE_URL: str = os.getenv("AUTH_DATABASE_URL", "sqlite:///./nexus_auth_dev.db")
@@ -145,6 +146,10 @@ class Settings:
     # Code Sandbox Limits
     MAX_EXECUTION_TIME_SECONDS: int = 5
     MAX_MEMORY_MB: int = 128
+
+    # AI Evaluation (Google Gemini Flash API)
+    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
+    AI_MODEL: str = os.getenv("AI_MODEL", "gemini-3.5-flash-lite")
 
 
 settings = Settings()

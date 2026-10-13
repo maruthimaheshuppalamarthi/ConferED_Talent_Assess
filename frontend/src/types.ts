@@ -129,6 +129,8 @@ export interface Assessment {
   roleTitle: string;
   description: string;
   totalDurationMinutes: number;
+  scheduledDate?: string | null;
+  startTime?: string | null;
   totalQuestions: number;
   passingPercentage: number;
   sections: Section[];

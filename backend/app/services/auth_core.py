@@ -199,7 +199,7 @@ def start_staff_login(db: Session, background: BackgroundTasks, portal: str,
 
     audit.password_verified(db, request, portal, user)
     challenge, code = issue_otp(db, staff_login_purpose(portal), user.id)
-    subject, body = email_service.staff_login_otp_email(code, rt.get_int("otpExpireMinutes"))
+    subject, body = email_service.staff_login_otp_email(code, rt.get_int("otpExpireMinutes"), name=user.full_name)
     email_service.dispatch_otp_email(user.otp_email, subject, body)
     log_dev_otp(f"{portal} login {user.email}", code)
     return challenge_out(challenge, user.otp_email, code)

@@ -1,9 +1,9 @@
-import { CsvExporterService } from '../services/csvExporter';
 import { ApiError } from '../services/authApi';
 import { BulkQuestionImportResult, JobItem, JobRoleItem, recruiterApi } from '../services/recruiterApi';
 import { CODING_LANGUAGES, defaultStarter } from '../services/starterCode';
 import { listedInputs } from '../services/testInputs';
 import { LanguageStarter, Question, QuestionCategory, Section } from '../types';
+import { questionBankStore, QuestionBankFolder } from '../services/questionBankStore';
 
 const SECTIONS = ['Quantitative Aptitude', 'Logical Reasoning', 'English', 'Technical'];
 const CATEGORIES: { label: string; type: Question['type'] }[] = [
@@ -12,11 +12,16 @@ const CATEGORIES: { label: string; type: Question['type'] }[] = [
   { label: 'Coding', type: 'coding' },
 ];
 
+const STANDARD_CATEGORIES: { label: string; type: Question['type'] }[] = [
+  { label: 'MCQ (Multiple Choice)', type: 'mcq' },
+  { label: 'Theory / Essay', type: 'essay' },
+];
+
 const categoryLabel = (type: string) =>
   CATEGORIES.find(c => c.type === type)?.label
   || (type === 'msq' ? 'MCQ' : type === 'sql' ? 'Coding' : type);
 
-/** Company library, or one job's question bank when jobId is set. */
+/** Professional Question Bank with Folder/Bank organization */
 export class QuestionBankPanel {
   private container: HTMLElement;
   private jobId: string;
@@ -32,6 +37,9 @@ export class QuestionBankPanel {
   private error = '';
   private starterDraft: Record<string, LanguageStarter> = {};
   private starterLang = 'python';
+
+  // Active folder / Question Bank ID (null = viewing all Question Bank folders)
+  private activeFolderId: string | null = null;
 
   constructor(container: HTMLElement, scope?: { jobId: string; jobTitle?: string }) {
     this.container = container;
@@ -79,24 +87,223 @@ export class QuestionBankPanel {
 
   private paint() {
     if (this.loading) {
-      this.container.innerHTML = `<p class="text-xs text-slate-500 font-mono py-8">Loading question bank…</p>`;
+      this.container.innerHTML = `<p class="text-xs text-slate-500 font-mono py-8">Loading question banks…</p>`;
       return;
     }
+
+    const banks = questionBankStore.getBanks();
+
+    // If an active folder is selected, render the contents of that folder
+    if (this.activeFolderId) {
+      const folder = questionBankStore.getBank(this.activeFolderId) || banks[0];
+      this.paintFolderView(folder);
+      return;
+    }
+
+    // Otherwise render the All Folders / Question Banks Hub
+    this.paintAllBanksView(banks);
+  }
+
+  /** View 1: Top-Level Question Banks (Folders Grid) */
+  private paintAllBanksView(banks: QuestionBankFolder[]) {
+    const selectedJobTitle = this.filterJobId ? this.jobTitleName(this.filterJobId) : '';
+    const displayedBanks = this.filterJobId
+      ? banks.filter(b => {
+          // If bank is assigned explicitly to this job
+          if (b.jobId === this.filterJobId) return true;
+          // If bank is assigned to a DIFFERENT job, NEVER show it
+          if (b.jobId && b.jobId !== this.filterJobId) return false;
+          // For general/unassigned banks (including Default Question Bank), show if it has questions for this job
+          const qCount = this.questions.filter(q => questionBankStore.getBankIdForQuestion(q) === b.id).length;
+          if (qCount > 0) return true;
+          // If Default Bank and no custom bank exists for this job yet, show Default Bank as a fallback
+          if (b.isDefault || b.id === 'qb-default') {
+            const hasAssignedBank = banks.some(other => other.jobId === this.filterJobId);
+            return !hasAssignedBank;
+          }
+          return false;
+        })
+      : banks;
 
     this.container.innerHTML = `
       <div class="glass-panel p-6 rounded-3xl border border-slate-800 space-y-6">
         <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-4">
           <div>
-            <h2 class="text-lg font-bold text-white">${this.jobId ? `${esc(this.jobTitle || 'Job')} question bank` : 'Question Bank'}</h2>
-            <p class="text-xs text-slate-400">Create a question, choose its section and category, and assign it to a job (${this.questions.length}).</p>
+            <div class="flex items-center gap-2.5">
+              <span class="text-xl">📁</span>
+              <h2 class="text-lg font-bold text-white">Question Banks</h2>
+              <span class="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-blue-500/15 text-blue-300 border border-blue-500/20">${displayedBanks.length} ${displayedBanks.length === 1 ? 'Bank' : 'Banks'}</span>
+            </div>
+            <p class="text-xs text-slate-400 mt-1">
+              Organize and author question banks into folders. Open a Question Bank to create questions, coding problems, or bulk import.
+            </p>
           </div>
           <div class="flex flex-wrap items-center gap-2">
-            ${this.jobId ? '' : `<button id="bulk-q-btn" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-blue-300 font-bold text-xs border border-slate-700">Bulk upload</button>`}
-            <button id="export-q-csv-btn" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-emerald-400 font-bold text-xs border border-slate-700">Export CSV</button>
-            <button id="create-q-btn" class="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-md">+ Create Question</button>
+            <button id="create-bank-btn" class="px-4 py-2 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold text-xs shadow-lg shadow-blue-600/25 flex items-center gap-1.5 transition-all">
+              <span>+</span> Create Question Bank
+            </button>
           </div>
         </div>
 
+        ${this.jobs.length ? `
+          <div class="flex flex-wrap gap-2 items-center">
+            <span class="text-xs text-slate-400 font-semibold mr-1">Filter by Job:</span>
+            <button data-job="" class="filter-job px-3 py-1 rounded-lg text-[11px] font-bold border ${!this.filterJobId ? 'bg-violet-600 text-white border-violet-500' : 'bg-slate-900 text-slate-400 border-slate-700'}">All jobs</button>
+            ${this.jobs.map(j => `
+              <button data-job="${esc(j.id)}" class="filter-job px-3 py-1 rounded-lg text-[11px] font-bold border ${this.filterJobId === j.id ? 'bg-violet-600 text-white border-violet-500' : 'bg-slate-900 text-slate-400 border-slate-700'}">${esc(j.title)}</button>
+            `).join('')}
+          </div>
+        ` : ''}
+
+        ${this.error ? `<p class="text-xs text-red-400 font-semibold">${esc(this.error)}</p>` : ''}
+
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+          ${displayedBanks.length ? displayedBanks.map(b => {
+            const qInBank = this.questions.filter(q => questionBankStore.getBankIdForQuestion(q) === b.id);
+            const mcqCount = qInBank.filter(q => q.type === 'mcq' || q.type === 'msq').length;
+            const codingCount = qInBank.filter(q => q.type === 'coding' || q.type === 'sql').length;
+            const theoryCount = qInBank.filter(q => q.type === 'essay').length;
+            const assignedJobTitle = b.jobTitle || (b.jobId ? this.jobTitleName(b.jobId) : null);
+
+            return `
+              <div class="group relative rounded-2xl bg-slate-900/90 border border-slate-800 hover:border-blue-500/50 p-5 transition-all duration-200 hover:shadow-xl hover:shadow-blue-500/5 flex flex-col justify-between">
+                <div class="space-y-3">
+                  <div class="flex items-start justify-between gap-3">
+                    <div class="w-12 h-12 rounded-2xl bg-gradient-to-br ${b.badgeTone || 'from-blue-600 to-indigo-600'} flex items-center justify-center text-2xl shadow-md shadow-blue-900/30">
+                      📁
+                    </div>
+                    ${b.isDefault || b.id === 'qb-default' ? `
+                      <span class="px-2.5 py-1 rounded-lg text-[10px] font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30 flex items-center gap-1">
+                        <span>🔒</span> Default Bank
+                      </span>
+                    ` : `
+                      <div class="flex items-center gap-1.5 opacity-80 group-hover:opacity-100 transition-opacity">
+                        <button data-bank-edit="${esc(b.id)}" class="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white text-xs" title="Edit Bank">✏️</button>
+                        <button data-bank-del="${esc(b.id)}" class="p-1.5 rounded-lg bg-slate-800 hover:bg-red-950/40 text-slate-400 hover:text-red-400 text-xs" title="Delete Bank">🗑️</button>
+                      </div>
+                    `}
+                  </div>
+
+                  <div>
+                    <h3 class="text-base font-bold text-white group-hover:text-blue-400 transition-colors">${esc(b.name)}</h3>
+                    <p class="text-xs text-slate-400 mt-1 line-clamp-2 leading-relaxed">${esc(b.description || 'Custom Question Bank folder for assessments.')}</p>
+                  </div>
+
+                  <div class="pt-1">
+                    <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[10px] font-bold bg-slate-800/80 text-slate-300 border border-slate-700/80">
+                      <span>💼</span>
+                      <span>${esc(assignedJobTitle ? assignedJobTitle : 'All Jobs / General')}</span>
+                    </span>
+                  </div>
+
+                  <div class="pt-2 border-t border-slate-800/80 flex items-center justify-between text-xs">
+                    <div>
+                      <span class="text-base font-extrabold font-mono text-white">${qInBank.length}</span>
+                      <span class="text-[11px] text-slate-400 ml-1">Questions</span>
+                    </div>
+                    <div class="text-[10px] text-slate-400 font-mono space-x-1">
+                      <span class="text-blue-400 font-semibold">${mcqCount} MCQ</span> •
+                      <span class="text-emerald-400 font-semibold">${codingCount} Coding</span> •
+                      <span class="text-purple-400 font-semibold">${theoryCount} Theory</span>
+                    </div>
+                  </div>
+                </div>
+
+                <button data-open-bank="${esc(b.id)}" class="w-full mt-4 py-2.5 px-4 rounded-xl bg-blue-600/15 hover:bg-blue-600 text-blue-300 hover:text-white font-bold text-xs border border-blue-500/30 hover:border-transparent transition-all flex items-center justify-center gap-2">
+                  <span>Open Question Bank</span>
+                  <span>➔</span>
+                </button>
+              </div>
+            `;
+          }).join('') : `
+            <div class="col-span-full py-12 px-6 text-center rounded-2xl bg-slate-900/60 border border-slate-800 space-y-3">
+              <div class="w-12 h-12 mx-auto rounded-2xl bg-slate-800 flex items-center justify-center text-2xl">
+                📁
+              </div>
+              <h4 class="text-sm font-bold text-slate-200">No Question Banks found for ${esc(selectedJobTitle || 'this job')}</h4>
+              <p class="text-xs text-slate-400 max-w-md mx-auto">
+                No question bank has been assigned to this job or contains questions for it yet.
+              </p>
+              <button id="create-bank-empty-btn" class="mt-2 px-4 py-2 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold text-xs shadow-lg shadow-blue-600/25 transition-all">
+                + Create Question Bank for ${esc(selectedJobTitle || 'this job')}
+              </button>
+            </div>
+          `}
+        </div>
+      </div>
+      <div id="admin-modal-host"></div>
+    `;
+
+    this.attachAllBanksEvents();
+  }
+
+  /** View 2: Inside a Question Bank Folder */
+  private paintFolderView(folder: QuestionBankFolder) {
+    const qInFolder = this.questions.filter(q => questionBankStore.getBankIdForQuestion(q) === folder.id && (!this.filterJobId || q.jobId === this.filterJobId));
+    const assignedJobTitle = folder.jobTitle || (folder.jobId ? this.jobTitleName(folder.jobId) : null);
+
+    this.container.innerHTML = `
+      <div class="glass-panel p-6 rounded-3xl border border-slate-800 space-y-6">
+        <!-- Breadcrumb & Top Bar -->
+        <div class="flex items-center justify-between border-b border-slate-800 pb-3 text-xs">
+          <div class="flex items-center gap-2 text-slate-400">
+            <button id="qb-back-btn" class="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-blue-400 hover:text-blue-300 font-bold flex items-center gap-1.5 border border-slate-700 transition-all">
+              <span>←</span> All Question Banks
+            </button>
+            <span class="text-slate-600">/</span>
+            <span class="text-white font-bold flex items-center gap-1">
+              <span>📁</span> ${esc(folder.name)}
+              ${folder.isDefault || folder.id === 'qb-default' ? `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30 ml-2">Permanent Default</span>` : ''}
+            </span>
+          </div>
+          <span class="text-[11px] text-slate-400 font-mono">${qInFolder.length} Questions inside</span>
+        </div>
+
+        <!-- Folder Header & Action Buttons -->
+        <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b border-slate-800 pb-5">
+          <div class="space-y-1">
+            <div class="flex items-center gap-3">
+              <div class="w-10 h-10 rounded-xl bg-gradient-to-br ${folder.badgeTone || 'from-blue-600 to-indigo-600'} flex items-center justify-center text-xl shadow">
+                📁
+              </div>
+              <div>
+                <h2 class="text-lg font-bold text-white">${esc(folder.name)}</h2>
+                <p class="text-xs text-slate-400">${esc(folder.description || 'Custom Question Bank folder.')}</p>
+              </div>
+            </div>
+            <div class="pt-1 pl-13">
+              <span class="text-[11px] font-semibold text-indigo-400">
+                Assigned Job: <strong class="text-slate-200">${esc(assignedJobTitle ? assignedJobTitle : 'All Jobs / General')}</strong>
+              </span>
+            </div>
+          </div>
+
+          <!-- Buttons inside folder per user request: Create Question, Create Coding Question, Bulk Upload (No Export) -->
+          <div class="flex flex-wrap items-center gap-2">
+            <button id="bulk-q-btn" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-blue-300 font-bold text-xs border border-slate-700">
+              Bulk upload
+            </button>
+            <button id="create-q-btn" class="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-md">
+              + Create Question
+            </button>
+            <button id="create-coding-q-btn" class="px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-xs shadow-md flex items-center gap-1.5 transition-all">
+              <span>⚡</span> + Create Coding Question
+            </button>
+          </div>
+        </div>
+
+        <!-- Job Filters inside Folder -->
+        ${this.jobs.length ? `
+          <div class="flex flex-wrap gap-2 items-center pb-1">
+            <span class="text-xs text-slate-400 font-semibold mr-1">Filter by Job:</span>
+            <button data-folder-job="" class="filter-folder-job px-3 py-1 rounded-lg text-[11px] font-bold border ${!this.filterJobId ? 'bg-violet-600 text-white border-violet-500' : 'bg-slate-900 text-slate-400 border-slate-700'}">All jobs</button>
+            ${this.jobs.map(j => `
+              <button data-folder-job="${esc(j.id)}" class="filter-folder-job px-3 py-1 rounded-lg text-[11px] font-bold border ${this.filterJobId === j.id ? 'bg-violet-600 text-white border-violet-500' : 'bg-slate-900 text-slate-400 border-slate-700'}">${esc(j.title)}</button>
+            `).join('')}
+          </div>
+        ` : ''}
+
+        <!-- Filter Chips inside Folder -->
         <div class="flex flex-wrap gap-2 items-center">
           <button data-section="" class="filter-section px-3 py-1.5 rounded-lg text-[11px] font-bold border ${!this.filterCategory ? 'bg-blue-600 text-white border-blue-500' : 'bg-slate-900 text-slate-400 border-slate-700'}">All sections</button>
           ${SECTIONS.map(name => `
@@ -109,19 +316,13 @@ export class QuestionBankPanel {
             <button data-type="${c.type}" class="filter-type px-3 py-1.5 rounded-lg text-[11px] font-bold border ${this.filterType === c.type ? 'bg-indigo-600 text-white border-indigo-500' : 'bg-slate-900 text-slate-400 border-slate-700'}">${c.label}</button>
           `).join('')}
         </div>
-        ${this.jobs.length ? `
-          <div class="flex flex-wrap gap-2">
-            <button data-job="" class="filter-job px-3 py-1.5 rounded-lg text-[11px] font-bold border ${!this.filterJobId ? 'bg-violet-600 text-white border-violet-500' : 'bg-slate-900 text-slate-400 border-slate-700'}">All jobs</button>
-            ${this.jobs.map(j => `
-              <button data-job="${esc(j.id)}" class="filter-job px-3 py-1.5 rounded-lg text-[11px] font-bold border ${this.filterJobId === j.id ? 'bg-violet-600 text-white border-violet-500' : 'bg-slate-900 text-slate-400 border-slate-700'}">${esc(j.title)}</button>
-            `).join('')}
-          </div>
-        ` : ''}
 
         ${this.error ? `<p class="text-xs text-red-400 font-semibold">${esc(this.error)}</p>` : ''}
+
+        <!-- Questions List inside Folder -->
         <div class="space-y-3">
-          ${this.questions.map(q => `
-            <div class="p-4 rounded-2xl bg-slate-900 border border-slate-800 flex items-center justify-between gap-3">
+          ${qInFolder.map(q => `
+            <div class="p-4 rounded-2xl bg-slate-900 border border-slate-800 hover:border-slate-700 flex items-center justify-between gap-3 transition-colors">
               <div class="min-w-0">
                 <div class="flex items-center gap-2">
                   <span class="px-2 py-0.5 text-[10px] font-bold rounded uppercase ${typeTone(q.type)}">${esc(q.type)}</span>
@@ -134,61 +335,121 @@ export class QuestionBankPanel {
                 <button data-q-edit="${q.id}" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-blue-400 font-bold text-xs border border-slate-700">Edit</button>
                 <button data-q-del="${q.id}" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-red-950/40 text-slate-400 hover:text-red-400 font-bold text-xs border border-slate-700">Delete</button>
               </div>
-            </div>`).join('') || '<p class="text-xs text-slate-500">No questions yet.</p>'}
+            </div>`).join('') || `
+            <div class="p-8 text-center rounded-2xl bg-slate-900/50 border border-slate-800 space-y-2">
+              <p class="text-sm font-bold text-slate-300">No questions in this Question Bank yet</p>
+              <p class="text-xs text-slate-500">Use the buttons above to create multiple choice, theory, coding challenges, or bulk upload.</p>
+            </div>
+          `}
         </div>
       </div>
-      <div id="admin-modal-host"></div>`;
+      <div id="admin-modal-host"></div>
+    `;
 
-    this.attachEvents();
+    this.attachFolderEvents(folder);
   }
 
-  private attachEvents() {
-    this.container.querySelector('#create-q-btn')?.addEventListener('click', () => this.renderQuestionModal());
-    this.container.querySelector('#bulk-q-btn')?.addEventListener('click', () => this.renderBulkUploadModal());
-    this.container.querySelectorAll('[data-cat-del]').forEach(btn => {
+  private attachAllBanksEvents() {
+    this.container.querySelector('#create-bank-btn')?.addEventListener('click', () => {
+      this.renderBankModal();
+    });
+    this.container.querySelector('#create-bank-empty-btn')?.addEventListener('click', () => {
+      this.renderBankModal();
+    });
+
+    this.container.querySelectorAll('[data-open-bank]').forEach(btn => {
+      btn.addEventListener('click', e => {
+        const id = (e.currentTarget as HTMLElement).getAttribute('data-open-bank');
+        if (id) {
+          this.activeFolderId = id;
+          this.paint();
+        }
+      });
+    });
+
+    this.container.querySelectorAll('[data-bank-edit]').forEach(btn => {
       btn.addEventListener('click', e => {
         e.stopPropagation();
-        const id = (e.currentTarget as HTMLElement).getAttribute('data-cat-del');
-        if (id && this.jobId && confirm('Delete this category?')) void this.removeCategory(id);
+        const id = (e.currentTarget as HTMLElement).getAttribute('data-bank-edit');
+        const bank = id ? questionBankStore.getBank(id) : null;
+        if (bank) this.renderBankModal(bank);
       });
     });
-    this.container.querySelectorAll('.filter-section').forEach(btn => {
+
+    this.container.querySelectorAll('[data-bank-del]').forEach(btn => {
       btn.addEventListener('click', e => {
-        this.filterCategory = (e.currentTarget as HTMLElement).getAttribute('data-section') || '';
-        void this.load();
+        e.stopPropagation();
+        const id = (e.currentTarget as HTMLElement).getAttribute('data-bank-del');
+        const b = id ? questionBankStore.getBank(id) : null;
+        if (b?.isDefault || id === 'qb-default') {
+          alert('Default Question Bank cannot be deleted.');
+          return;
+        }
+        if (id && confirm('Delete this Question Bank folder? Questions will be reassigned to the default bank.')) {
+          questionBankStore.deleteBank(id);
+          this.paint();
+        }
       });
     });
-    this.container.querySelectorAll('.filter-type').forEach(btn => {
-      btn.addEventListener('click', e => {
-        this.filterType = (e.currentTarget as HTMLElement).getAttribute('data-type') || '';
-        void this.load();
-      });
-    });
+
     this.container.querySelectorAll('.filter-job').forEach(btn => {
       btn.addEventListener('click', e => {
         this.filterJobId = (e.currentTarget as HTMLElement).getAttribute('data-job') || '';
         void this.load();
       });
     });
+  }
+
+  private attachFolderEvents(folder: QuestionBankFolder) {
+    this.container.querySelector('#qb-back-btn')?.addEventListener('click', () => {
+      this.activeFolderId = null;
+      this.paint();
+    });
+
+    this.container.querySelector('#create-q-btn')?.addEventListener('click', () => this.renderQuestionModal(undefined, folder.id));
+    this.container.querySelector('#create-coding-q-btn')?.addEventListener('click', () => this.renderCodingQuestionModal(undefined, folder.id));
+    this.container.querySelector('#bulk-q-btn')?.addEventListener('click', () => this.renderBulkUploadModal(folder.id));
+
+    this.container.querySelectorAll('.filter-folder-job').forEach(btn => {
+      btn.addEventListener('click', e => {
+        this.filterJobId = (e.currentTarget as HTMLElement).getAttribute('data-folder-job') || '';
+        void this.load();
+      });
+    });
+
+    this.container.querySelectorAll('.filter-section').forEach(btn => {
+      btn.addEventListener('click', e => {
+        this.filterCategory = (e.currentTarget as HTMLElement).getAttribute('data-section') || '';
+        void this.load();
+      });
+    });
+
+    this.container.querySelectorAll('.filter-type').forEach(btn => {
+      btn.addEventListener('click', e => {
+        this.filterType = (e.currentTarget as HTMLElement).getAttribute('data-type') || '';
+        void this.load();
+      });
+    });
+
     this.container.querySelectorAll('[data-q-edit]').forEach(btn => {
       btn.addEventListener('click', e => {
         const id = (e.currentTarget as HTMLElement).getAttribute('data-q-edit');
         const q = this.questions.find(item => item.id === id);
-        if (q) this.renderQuestionModal(q);
+        if (q) {
+          if (q.type === 'coding' || q.type === 'sql') {
+            this.renderCodingQuestionModal(q, folder.id);
+          } else {
+            this.renderQuestionModal(q, folder.id);
+          }
+        }
       });
     });
+
     this.container.querySelectorAll('[data-q-del]').forEach(btn => {
       btn.addEventListener('click', e => {
         const id = (e.currentTarget as HTMLElement).getAttribute('data-q-del');
         if (id && confirm('Delete this question?')) void this.remove(id);
       });
-    });
-    this.container.querySelector('#export-q-csv-btn')?.addEventListener('click', () => {
-      const headers = ['Title', 'Type', 'Category', 'Difficulty', 'Points', 'Tags'];
-      const rows = this.questions.map(q => [
-        q.title, q.type, q.sectionCategory || q.category, q.difficulty, q.points, (q.tags || []).join('; '),
-      ]);
-      CsvExporterService.downloadCsv('Question_Bank_Export.csv', headers, rows);
     });
   }
 
@@ -196,116 +457,76 @@ export class QuestionBankPanel {
     return this.jobs.find(j => j.id === q.jobId)?.title || q.jobRole || '';
   }
 
-  private async removeCategory(id: string) {
-    if (!this.jobId) return;
-    try {
-      await recruiterApi.deleteJobCategory(this.jobId, id);
-      if (this.categories.find(c => c.id === id)?.label === this.filterCategory) this.filterCategory = '';
-      await this.load();
-    } catch (e) {
-      alert(e instanceof ApiError ? e.message : 'Could not delete the category.');
-    }
+  private jobTitleName(jobId: string): string {
+    return this.jobs.find(j => j.id === jobId)?.title || '';
   }
 
-  private renderSectionModal() {
-    const host = this.container.querySelector('#admin-modal-host') as HTMLElement;
-    if (!host) return;
-    if (!this.jobs.length) {
-      alert('Create a job in the Assessment Builder first.');
+  /** Modal: Create or Edit Question Bank Folder */
+  private renderBankModal(bank?: QuestionBankFolder) {
+    if (bank && (bank.isDefault || bank.id === 'qb-default')) {
+      alert('The Default Question Bank is permanent and cannot be modified or renamed.');
       return;
     }
-    host.innerHTML = `
-      <div class="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4">
-        <div class="glass-panel w-full max-w-md rounded-3xl border border-slate-800 p-6 space-y-5">
-          <div class="flex items-center justify-between border-b border-slate-800 pb-3">
-            <h3 class="text-base font-extrabold text-white">Add section to a job</h3>
-            <button id="close-sec-bank" class="text-slate-400 hover:text-white font-bold">✕</button>
-          </div>
-          <form id="sec-bank-form" class="space-y-3 text-xs">
-            <div>
-              <label class="block font-semibold text-slate-300 mb-1">Job</label>
-              <select id="sec-job" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white">
-                ${this.jobs.map(j => `<option value="${esc(j.id)}">${esc(j.title)}</option>`).join('')}
-              </select>
-            </div>
-            <div>
-              <label class="block font-semibold text-slate-300 mb-1">Section name</label>
-              <input id="sec-name" required class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white" placeholder="e.g. Technical MCQs" />
-            </div>
-            <div class="grid grid-cols-2 gap-3">
-              <div>
-                <label class="block font-semibold text-slate-300 mb-1">Minutes</label>
-                <input id="sec-mins" type="number" value="15" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white" />
-              </div>
-              <div>
-                <label class="block font-semibold text-slate-300 mb-1">Cutoff</label>
-                <input id="sec-pass" type="number" value="10" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white" />
-              </div>
-            </div>
-            <div class="flex justify-end gap-3 pt-2">
-              <button type="button" id="close-sec-bank-2" class="px-4 py-2 rounded-xl bg-slate-800 text-slate-300 font-bold">Cancel</button>
-              <button type="submit" class="px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold">Add</button>
-            </div>
-          </form>
-        </div>
-      </div>`;
-    const close = () => { host.innerHTML = ''; };
-    host.querySelector('#close-sec-bank')?.addEventListener('click', close);
-    host.querySelector('#close-sec-bank-2')?.addEventListener('click', close);
-    host.querySelector('#sec-bank-form')?.addEventListener('submit', e => {
-      e.preventDefault();
-      const jobId = (host.querySelector('#sec-job') as HTMLSelectElement).value;
-      const name = (host.querySelector('#sec-name') as HTMLInputElement).value.trim();
-      const timeLimitMinutes = parseInt((host.querySelector('#sec-mins') as HTMLInputElement).value, 10) || 15;
-      const passingMarks = parseInt((host.querySelector('#sec-pass') as HTMLInputElement).value, 10) || 10;
-      if (!name) return;
-      void recruiterApi.createJobSection(jobId, { name, timeLimitMinutes, passingMarks }).then(() => {
-        close();
-        return this.load();
-      }).catch(err => {
-        alert(err instanceof ApiError ? err.message : 'Could not add the section.');
-      });
-    });
-  }
-
-  private renderCategoryModal() {
     const host = this.container.querySelector('#admin-modal-host') as HTMLElement;
     if (!host) return;
+    const isEdit = !!bank;
+
     host.innerHTML = `
       <div class="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4">
         <div class="glass-panel w-full max-w-md rounded-3xl border border-slate-800 p-6 space-y-5">
           <div class="flex items-center justify-between border-b border-slate-800 pb-3">
-            <h3 class="text-base font-extrabold text-white">Add category</h3>
-            <button id="close-cat-modal" class="text-slate-400 hover:text-white font-bold">✕</button>
+            <h3 class="text-base font-extrabold text-white">${isEdit ? 'Edit Question Bank' : 'Create Question Bank Folder'}</h3>
+            <button id="close-bank-modal" class="text-slate-400 hover:text-white font-bold">✕</button>
           </div>
-          <form id="cat-form" class="space-y-3 text-xs">
+          <form id="bank-form" class="space-y-4 text-xs">
             <div>
-              <label class="block font-semibold text-slate-300 mb-1">Name</label>
-              <input id="cat-label" required class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white" placeholder="e.g. SQL" autocomplete="off" />
+              <label class="block font-semibold text-slate-300 mb-1">Question Bank Name</label>
+              <input id="bank-name" required value="${esc(bank?.name || '')}" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white font-bold" placeholder="e.g. Question Bank 1, Core Technical Bank" />
             </div>
-            <div class="flex justify-end gap-3 pt-2">
-              <button type="button" id="close-cat-modal-2" class="px-4 py-2 rounded-xl bg-slate-800 text-slate-300 font-bold">Cancel</button>
-              <button type="submit" class="px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold">Add</button>
+            <div>
+              <label class="block font-semibold text-slate-300 mb-1">Description</label>
+              <textarea id="bank-desc" rows="2" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white" placeholder="Description of topics covered in this question bank">${esc(bank?.description || '')}</textarea>
+            </div>
+            <div>
+              <label class="block font-semibold text-slate-300 mb-1">Assign to Job (Optional)</label>
+              <select id="bank-job" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white">
+                <option value="">— All Jobs / General Library —</option>
+                ${this.jobs.map(j => {
+                  const selected = bank ? bank.jobId === j.id : this.filterJobId === j.id;
+                  return `<option value="${esc(j.id)}" ${selected ? 'selected' : ''}>${esc(j.title)}</option>`;
+                }).join('')}
+              </select>
+            </div>
+            <div class="flex justify-end gap-3 pt-3 border-t border-slate-800">
+              <button type="button" id="close-bank-modal-2" class="px-4 py-2 rounded-xl bg-slate-800 text-slate-300 font-bold">Cancel</button>
+              <button type="submit" class="px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold">${isEdit ? 'Save Changes' : 'Create Bank'}</button>
             </div>
           </form>
         </div>
-      </div>`;
+      </div>
+    `;
+
     const close = () => { host.innerHTML = ''; };
-    host.querySelector('#close-cat-modal')?.addEventListener('click', close);
-    host.querySelector('#close-cat-modal-2')?.addEventListener('click', close);
-    host.querySelector('#cat-form')?.addEventListener('submit', e => {
+    host.querySelector('#close-bank-modal')?.addEventListener('click', close);
+    host.querySelector('#close-bank-modal-2')?.addEventListener('click', close);
+
+    host.querySelector('#bank-form')?.addEventListener('submit', e => {
       e.preventDefault();
-      const label = (host.querySelector('#cat-label') as HTMLInputElement).value.trim();
-      if (!label) return;
-      const save = this.jobId
-        ? recruiterApi.createJobCategory(this.jobId, label)
-        : recruiterApi.createCategory(label);
-      void save.then(() => {
-        close();
-        return this.load();
-      }).catch(err => {
-        alert(err instanceof ApiError ? err.message : 'Could not add the category.');
-      });
+      const name = (host.querySelector('#bank-name') as HTMLInputElement).value.trim();
+      const desc = (host.querySelector('#bank-desc') as HTMLTextAreaElement).value.trim();
+      const jobId = (host.querySelector('#bank-job') as HTMLSelectElement).value || null;
+      const jobTitle = jobId ? this.jobTitleName(jobId) : null;
+
+      if (!name) return;
+
+      if (isEdit && bank) {
+        questionBankStore.updateBank(bank.id, { name, description: desc, jobId, jobTitle });
+      } else {
+        const created = questionBankStore.createBank(name, desc, jobId, jobTitle);
+        this.activeFolderId = created.id;
+      }
+      close();
+      this.paint();
     });
   }
 
@@ -318,43 +539,50 @@ export class QuestionBankPanel {
     }
   }
 
-  private renderQuestionModal(q?: Question) {
+  private renderQuestionModal(q?: Question, bankIdDefault?: string) {
     const host = this.container.querySelector('#admin-modal-host') as HTMLElement;
     if (!host) return;
-    if (this.jobId && !this.categories.length) {
-      alert('Add a category for this job first.');
-      return;
-    }
     const isEdit = !!q;
     const opts = q?.options?.length ? q.options : [
-      { id: 'opt-a', text: '' }, { id: 'opt-b', text: '' },
+      { id: 'opt-1', text: '' },
+      { id: 'opt-2', text: '' },
     ];
-    const cases = q?.testCases?.length ? q.testCases : [
-      { id: 'tc-1', input: '', expectedOutput: '', isHidden: false, weight: 1 },
-      { id: 'tc-2', input: '', expectedOutput: '', isHidden: true, weight: 1 },
-    ];
-    const catVal = q?.sectionCategory || q?.category || 'General';
+    const catVal = q?.sectionCategory || 'Quantitative Aptitude';
+    const banks = questionBankStore.getBanks();
+    const currentBankId = q ? questionBankStore.getBankIdForQuestion(q) : (bankIdDefault || banks[0]?.id || 'qb-1');
 
     host.innerHTML = `
       <div class="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4">
-        <div class="glass-panel w-full max-w-3xl max-h-[90vh] overflow-y-auto rounded-3xl border border-slate-800 p-6 space-y-5">
+        <div class="glass-panel w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-3xl border border-slate-800 p-6 space-y-5">
           <div class="flex items-center justify-between border-b border-slate-800 pb-4">
-            <h3 class="text-lg font-extrabold text-white">${isEdit ? 'Modify Question' : 'Create Question'}</h3>
-            <button id="close-q-modal-btn" class="text-slate-400 hover:text-white font-bold">✕</button>
+            <div>
+              <h3 class="text-lg font-extrabold text-white">${isEdit ? 'Modify Question' : 'Create Question'}</h3>
+              <p class="text-xs text-slate-400">Author objective Multiple Choice or descriptive Theory questions.</p>
+            </div>
+            <button id="close-q-modal-btn" class="text-slate-400 hover:text-white font-bold text-base hover:bg-slate-800 p-2 rounded-xl">✕</button>
           </div>
           <form id="q-form" class="space-y-4 text-xs">
             <div>
               <label class="block font-semibold text-slate-300 mb-1">Title</label>
-              <input id="q-title" value="${esc(q?.title || '')}" required class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white" />
+              <input id="q-title" value="${esc(q?.title || '')}" required class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white" placeholder="e.g. Memory allocation in Python, Time Complexity of Merge Sort" />
             </div>
             <div>
               <label class="block font-semibold text-slate-300 mb-1">Stem / Content</label>
-              <textarea id="q-content" rows="3" required class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white">${esc(q?.content || '')}</textarea>
+              <textarea id="q-content" rows="3" required class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white" placeholder="Question statement seen by candidates">${esc(q?.content || '')}</textarea>
             </div>
             <div>
               <label class="block font-semibold text-slate-300 mb-1">Explanation</label>
-              <textarea id="q-explanation" rows="3" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white" placeholder="Why this answer is correct. Candidates do not see this during the exam.">${esc(q?.explanation || '')}</textarea>
+              <textarea id="q-explanation" rows="2" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white" placeholder="Why this answer is correct. Candidates do not see this during the exam.">${esc(q?.explanation || '')}</textarea>
             </div>
+
+            <!-- Question Bank Folder Selection -->
+            <div>
+              <label class="block font-semibold text-slate-300 mb-1">📁 Question Bank Folder</label>
+              <select id="q-bank" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white font-medium">
+                ${banks.map(b => `<option value="${esc(b.id)}" ${b.id === currentBankId ? 'selected' : ''}>${esc(b.name)}</option>`).join('')}
+              </select>
+            </div>
+
             <div class="grid grid-cols-2 gap-4">
               <div>
                 <label class="block font-semibold text-slate-300 mb-1">Section</label>
@@ -365,7 +593,7 @@ export class QuestionBankPanel {
               <div>
                 <label class="block font-semibold text-slate-300 mb-1">Category</label>
                 <select id="q-type" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white">
-                  ${CATEGORIES.map(c => `<option value="${c.type}" ${q?.type === c.type || (!q && c.type === 'mcq') ? 'selected' : ''}>${c.label}</option>`).join('')}
+                  ${STANDARD_CATEGORIES.map(c => `<option value="${c.type}" ${q?.type === c.type || (!q && c.type === 'mcq') ? 'selected' : ''}>${c.label}</option>`).join('')}
                 </select>
               </div>
             </div>
@@ -415,33 +643,6 @@ export class QuestionBankPanel {
               </div>
             </div>
 
-            <div id="panel-coding" class="space-y-3 hidden">
-              <div>
-                <label class="block font-semibold text-slate-300 mb-1">Constraints</label>
-                <textarea id="q-constraints" rows="2" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white">${esc(q?.constraints || '')}</textarea>
-              </div>
-              <div>
-                <label class="block font-semibold text-slate-300 mb-1">I/O format</label>
-                <textarea id="q-io" rows="2" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white">${esc(q?.ioFormat || '')}</textarea>
-              </div>
-              <div id="starter-block" class="space-y-2">
-                <p class="font-semibold text-slate-300">Starter code</p>
-                <p class="text-[11px] text-slate-500">Each language opens with its own syntax. The candidate writes between the two blocks, and both blocks stay locked. Edit a language, or clear both boxes to leave it unlocked.</p>
-                <div id="starter-tabs" class="flex flex-wrap gap-1.5"></div>
-                <label class="block font-semibold text-slate-400">Code before (locked)</label>
-                <textarea id="starter-before" rows="8" class="glass-input w-full px-3 py-2 rounded-xl border border-slate-700 bg-slate-950 text-white font-mono" spellcheck="false"></textarea>
-                <p class="text-[10px] text-blue-300">Candidate writes here</p>
-                <label class="block font-semibold text-slate-400">Code after (locked)</label>
-                <textarea id="starter-after" rows="8" class="glass-input w-full px-3 py-2 rounded-xl border border-slate-700 bg-slate-950 text-white font-mono" spellcheck="false"></textarea>
-              </div>
-              <p class="font-semibold text-slate-300">Test cases (include ≥1 hidden for publish)</p>
-              <p class="text-[11px] text-slate-500">One test case can hold Input 1, Input 2, and more. The program receives them as separate lines, in that order. Shift+Enter adds a line inside one input.</p>
-              <div id="tc-list" class="space-y-2">
-                ${cases.map((c, i) => tcRow(c, i)).join('')}
-              </div>
-              <button type="button" id="add-tc" class="text-blue-400 font-bold">+ Add test case</button>
-            </div>
-
             <div id="panel-essay" class="space-y-3 hidden">
               <div class="grid grid-cols-2 gap-4">
                 <div>
@@ -455,7 +656,7 @@ export class QuestionBankPanel {
               </div>
               <div>
                 <label class="block font-semibold text-slate-300 mb-1">Rubric</label>
-                <textarea id="q-rubric" rows="3" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white">${esc(q?.rubric || '')}</textarea>
+                <textarea id="q-rubric" rows="3" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white" placeholder="Evaluation criteria for automated AI scoring">${esc(q?.rubric || '')}</textarea>
               </div>
             </div>
 
@@ -475,8 +676,6 @@ export class QuestionBankPanel {
       const t = (host.querySelector('#q-type') as HTMLSelectElement).value;
       const showOpts = t === 'mcq' || t === 'msq' || t === 'drag_drop';
       host.querySelector('#panel-mcq')?.classList.toggle('hidden', !showOpts);
-      host.querySelector('#panel-coding')?.classList.toggle('hidden', !(t === 'coding' || t === 'sql'));
-      host.querySelector('#starter-block')?.classList.toggle('hidden', t !== 'coding');
       host.querySelector('#panel-essay')?.classList.toggle('hidden', t !== 'essay');
       host.querySelector('#drag-hint')?.classList.toggle('hidden', t !== 'drag_drop');
       const label = host.querySelector('#opts-label');
@@ -487,54 +686,12 @@ export class QuestionBankPanel {
     };
     host.querySelector('#q-type')?.addEventListener('change', syncPanels);
     syncPanels();
-    this.mountStarterEditor(host, q);
-    host.querySelector('#q-form')?.addEventListener('keydown', event => {
-      const keyEvent = event as KeyboardEvent;
-      const target = keyEvent.target;
-      if (!(target instanceof HTMLTextAreaElement)) return;
-      if (!target.classList.contains('tc-in') && !target.classList.contains('tc-out')) return;
-      if (keyEvent.key === 'Enter' && keyEvent.shiftKey) {
-        keyEvent.preventDefault();
-        const start = target.selectionStart;
-        const end = target.selectionEnd;
-        target.value = `${target.value.slice(0, start)}\n${target.value.slice(end)}`;
-        target.selectionStart = target.selectionEnd = start + 1;
-      }
-    });
-    const jobSel = host.querySelector('#q-job') as HTMLSelectElement | null;
-    jobSel?.addEventListener('change', () => { void this.fillSections(host, q); });
-    void this.fillSections(host, q);
 
     host.querySelector('#add-opt')?.addEventListener('click', () => {
       const list = host.querySelector('#opts-list');
       if (!list) return;
       const id = `opt-${Date.now()}`;
       list.insertAdjacentHTML('beforeend', optionRow(id, '', false, list.children.length));
-    });
-    host.querySelector('#add-tc')?.addEventListener('click', () => {
-      const list = host.querySelector('#tc-list');
-      if (!list) return;
-      list.insertAdjacentHTML('beforeend', tcRow({
-        id: `tc-${Date.now()}`, input: '', inputs: [''], expectedOutput: '', isHidden: true, weight: 1,
-      }, list.children.length));
-    });
-    host.querySelector('#tc-list')?.addEventListener('click', event => {
-      const target = event.target as HTMLElement;
-      const add = target.closest('.add-tc-input');
-      if (add) {
-        const box = add.closest('[data-tc-row]')?.querySelector('.tc-inputs');
-        if (!box) return;
-        box.insertAdjacentHTML('beforeend', tcInputSlot('', box.querySelectorAll('.tc-input-slot').length));
-        return;
-      }
-      const remove = target.closest('.remove-tc-input');
-      const slot = remove?.closest('.tc-input-slot');
-      const box = slot?.parentElement;
-      if (!slot || !box || box.querySelectorAll('.tc-input-slot').length < 2) return;
-      slot.remove();
-      box.querySelectorAll('.tc-input-label').forEach((label, index) => {
-        label.textContent = `Input ${index + 1}`;
-      });
     });
 
     host.querySelector('#q-form')?.addEventListener('submit', e => {
@@ -543,25 +700,194 @@ export class QuestionBankPanel {
     });
   }
 
-  private async fillSections(host: HTMLElement, q?: Question) {
-    const sel = host.querySelector('#q-section') as HTMLSelectElement | null;
-    const jobId = (host.querySelector('#q-job') as HTMLSelectElement | null)?.value || '';
-    if (!sel) return;
-    if (!jobId) {
-      sel.innerHTML = `<option value="">Choose a job first</option>`;
-      return;
-    }
-    const job = this.jobs.find(j => j.id === jobId);
-    if (!job) return;
-    try {
-      const exam = await recruiterApi.assessment(job.assessmentId);
-      const current = exam.sections.find(s => (s.questions || []).some(item => item.id === q?.id));
-      sel.innerHTML = `<option value="">No section yet</option>${exam.sections.map(s =>
-        `<option value="${esc(s.id)}" ${current?.id === s.id ? 'selected' : ''}>${esc(s.name)}</option>`,
-      ).join('')}`;
-    } catch {
-      sel.innerHTML = `<option value="">Could not load sections</option>`;
-    }
+  private renderCodingQuestionModal(q?: Question, bankIdDefault?: string) {
+    const host = this.container.querySelector('#admin-modal-host') as HTMLElement;
+    if (!host) return;
+    const isEdit = !!q;
+    const cases = q?.testCases?.length ? q.testCases : [
+      { id: 'tc-1', input: '2 7 11 15\n9', inputs: ['2 7 11 15', '9'], expectedOutput: '0 1', isHidden: false, weight: 1 },
+      { id: 'tc-2', input: '3 2 4\n6', inputs: ['3 2 4', '6'], expectedOutput: '1 2', isHidden: true, weight: 1 },
+    ];
+    const catVal = q?.sectionCategory || 'Technical';
+    const banks = questionBankStore.getBanks();
+    const currentBankId = q ? questionBankStore.getBankIdForQuestion(q) : (bankIdDefault || banks[0]?.id || 'qb-1');
+
+    host.innerHTML = `
+      <div class="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4">
+        <div class="glass-panel w-full max-w-4xl max-h-[92vh] overflow-y-auto rounded-3xl border border-slate-800 p-6 space-y-6">
+          <div class="flex items-center justify-between border-b border-slate-800 pb-4">
+            <div class="space-y-1">
+              <div class="flex items-center gap-2">
+                <span class="px-2.5 py-0.5 rounded-full text-[10px] font-extrabold uppercase bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">⚡ LeetCode Problem Studio</span>
+                <span class="px-2 py-0.5 rounded-md text-[10px] font-bold bg-slate-800 text-slate-400">Competitive Coding</span>
+              </div>
+              <h3 class="text-xl font-extrabold text-white">${isEdit ? 'Modify Coding Challenge' : 'Create Coding Challenge'}</h3>
+              <p class="text-xs text-slate-400">Design problem statement, runtime constraints, boilerplate starter stubs, and automated test cases.</p>
+            </div>
+            <button id="close-code-modal-btn" class="p-2 text-slate-400 hover:text-white font-bold text-base hover:bg-slate-800 rounded-xl transition-all">✕</button>
+          </div>
+
+          <form id="code-q-form" class="space-y-5 text-xs">
+            <div class="space-y-1.5">
+              <label class="block font-semibold text-slate-200">Problem Title <span class="text-rose-400">*</span></label>
+              <input id="code-q-title" value="${esc(q?.title || '')}" required placeholder="e.g. Two Sum, Reverse Linked List, Valid Palindrome, LRU Cache" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white font-medium" />
+            </div>
+
+            <!-- Folder selection row -->
+            <div>
+              <label class="block font-semibold text-slate-300 mb-1">📁 Question Bank Folder</label>
+              <select id="code-q-bank" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white font-medium">
+                ${banks.map(b => `<option value="${esc(b.id)}" ${b.id === currentBankId ? 'selected' : ''}>${esc(b.name)}</option>`).join('')}
+              </select>
+            </div>
+
+            <div class="grid grid-cols-1 sm:grid-cols-4 gap-4 p-4 rounded-2xl bg-slate-950/60 border border-slate-800">
+              <div>
+                <label class="block font-semibold text-slate-300 mb-1">Section</label>
+                <select id="code-q-cat" class="glass-input w-full px-3 py-2 rounded-xl border border-slate-700 bg-slate-900 text-white">
+                  ${SECTIONS.map(name => `<option value="${esc(name)}" ${name === catVal ? 'selected' : ''}>${esc(name)}</option>`).join('')}
+                </select>
+              </div>
+              <div>
+                <label class="block font-semibold text-slate-300 mb-1">Assign to Job</label>
+                <select id="code-q-job" class="glass-input w-full px-3 py-2 rounded-xl border border-slate-700 bg-slate-900 text-white">
+                  <option value="">Not assigned</option>
+                  ${this.jobs.map(j => {
+                    const closed = j.status === 'closed';
+                    const selected = q?.jobId === j.id;
+                    if (closed && !selected) return '';
+                    return `<option value="${esc(j.id)}" ${selected ? 'selected' : ''} ${closed ? 'disabled' : ''}>${esc(j.title)}${closed ? ' (closed)' : ''}</option>`;
+                  }).join('')}
+                </select>
+              </div>
+              <div>
+                <label class="block font-semibold text-slate-300 mb-1">Difficulty</label>
+                <select id="code-q-diff" class="glass-input w-full px-3 py-2 rounded-xl border border-slate-700 bg-slate-900 text-white">
+                  ${['easy', 'medium', 'hard'].map(d => `<option value="${d}" ${q?.difficulty === d ? 'selected' : ''}>${d.toUpperCase()}</option>`).join('')}
+                </select>
+              </div>
+              <div>
+                <label class="block font-semibold text-slate-300 mb-1">Score / Points</label>
+                <input type="number" id="code-q-points" value="${q?.points || 20}" class="glass-input w-full px-3 py-2 rounded-xl border border-slate-700 bg-slate-900 text-white" />
+              </div>
+            </div>
+
+            <div class="space-y-1.5">
+              <div class="flex items-center justify-between">
+                <label class="block font-semibold text-slate-200">Problem Description (Markdown Supported) <span class="text-rose-400">*</span></label>
+                <span class="text-[11px] text-slate-400">Include clear problem background and example inputs/outputs</span>
+              </div>
+              <textarea id="code-q-content" rows="6" required class="glass-input w-full p-3.5 rounded-xl border border-slate-700 bg-slate-950 text-white font-mono leading-relaxed" placeholder="Given an array of integers nums and an integer target...">${esc(q?.content || '')}</textarea>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div class="space-y-1.5">
+                <label class="block font-semibold text-slate-300">Constraints</label>
+                <textarea id="code-q-constraints" rows="3" class="glass-input w-full p-3 rounded-xl border border-slate-700 bg-slate-950 text-white font-mono text-[11px]" placeholder="1 <= nums.length <= 10^5">${esc(q?.constraints || '')}</textarea>
+              </div>
+              <div class="space-y-1.5">
+                <label class="block font-semibold text-slate-300">Input / Output Format</label>
+                <textarea id="code-q-io" rows="3" class="glass-input w-full p-3 rounded-xl border border-slate-700 bg-slate-950 text-white font-mono text-[11px]" placeholder="Input: First line contains array elements.">${esc(q?.ioFormat || '')}</textarea>
+              </div>
+            </div>
+
+            <!-- Starter Boilerplate Code -->
+            <div id="starter-block" class="space-y-3 p-4 rounded-2xl bg-slate-950/60 border border-slate-800">
+              <div class="flex items-center justify-between">
+                <div>
+                  <p class="font-bold text-slate-200">Starter Boilerplate Code</p>
+                  <p class="text-[11px] text-slate-400">Configure language signature stubs (Python, JS, C++, Java, etc.). Candidate writes inside the middle editable space.</p>
+                </div>
+              </div>
+              <div id="starter-tabs" class="flex flex-wrap gap-1.5 pt-1"></div>
+              <div class="space-y-2">
+                <label class="block font-semibold text-slate-400 text-[11px]">Function Header / Code Before (Locked)</label>
+                <textarea id="starter-before" rows="4" class="glass-input w-full px-3 py-2 rounded-xl border border-slate-700 bg-slate-950 text-emerald-300 font-mono text-[11px]" spellcheck="false"></textarea>
+                <div class="py-1 px-3 rounded-lg bg-blue-500/10 border border-blue-500/20 text-[11px] text-blue-300 font-mono text-center">
+                  ⌨️ Candidate Editor Space (Candidate writes implementation here)
+                </div>
+                <label class="block font-semibold text-slate-400 text-[11px]">Runner Harness / Code After (Locked)</label>
+                <textarea id="starter-after" rows="3" class="glass-input w-full px-3 py-2 rounded-xl border border-slate-700 bg-slate-950 text-emerald-300 font-mono text-[11px]" spellcheck="false"></textarea>
+              </div>
+            </div>
+
+            <!-- Test Cases Suite -->
+            <div class="space-y-3 p-4 rounded-2xl bg-slate-950/60 border border-slate-800">
+              <div class="flex items-center justify-between">
+                <div>
+                  <div class="flex items-center gap-2">
+                    <p class="font-bold text-slate-200">Test Cases Suite</p>
+                    <span class="px-2 py-0.5 rounded bg-blue-500/10 text-blue-300 text-[10px] font-bold">Automated Evaluator</span>
+                  </div>
+                  <p class="text-[11px] text-slate-400 mt-0.5">Include public test cases (matching Examples) and hidden test cases for final grading.</p>
+                </div>
+                <button type="button" id="add-code-tc" class="px-3 py-1.5 rounded-lg bg-blue-600/20 hover:bg-blue-600 text-blue-300 hover:text-white font-bold text-xs border border-blue-500/30 transition-all">+ Add Test Case</button>
+              </div>
+              <div id="tc-list" class="space-y-3 pt-1">
+                ${cases.map((c, i) => tcRow(c, i)).join('')}
+              </div>
+            </div>
+
+            <div class="flex justify-end gap-3 pt-4 border-t border-slate-800">
+              <button type="button" id="close-code-modal-btn-2" class="px-5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold">Cancel</button>
+              <button type="submit" class="px-7 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold shadow-lg shadow-emerald-600/30">${isEdit ? 'SAVE CHALLENGE' : 'CREATE CHALLENGE'}</button>
+            </div>
+          </form>
+        </div>
+      </div>`;
+
+    const close = () => { host.innerHTML = ''; };
+    host.querySelector('#close-code-modal-btn')?.addEventListener('click', close);
+    host.querySelector('#close-code-modal-btn-2')?.addEventListener('click', close);
+
+    this.mountStarterEditor(host, q);
+
+    host.querySelector('#add-code-tc')?.addEventListener('click', () => {
+      const list = host.querySelector('#tc-list');
+      if (!list) return;
+      const id = `tc-${Date.now()}`;
+      list.insertAdjacentHTML('beforeend', tcRow({ id, input: '', inputs: [''], expectedOutput: '', isHidden: false, weight: 1 }, list.children.length));
+      this.attachTestCasesInputHandlers(host);
+    });
+
+    this.attachTestCasesInputHandlers(host);
+
+    host.querySelector('#code-q-form')?.addEventListener('submit', e => {
+      e.preventDefault();
+      void this.saveCodingQuestion(q, host, close);
+    });
+  }
+
+  private attachTestCasesInputHandlers(host: HTMLElement) {
+    host.querySelectorAll<HTMLButtonElement>('.add-tc-input').forEach(btn => {
+      if (btn.dataset.bound) return;
+      btn.dataset.bound = 'true';
+      btn.addEventListener('click', () => {
+        const slotContainer = btn.closest('[data-tc-row]')?.querySelector('.tc-inputs');
+        if (!slotContainer) return;
+        const count = slotContainer.querySelectorAll('.tc-input-slot').length;
+        slotContainer.insertAdjacentHTML('beforeend', tcInputSlot('', count));
+        this.reindexTcInputs(slotContainer as HTMLElement);
+      });
+    });
+
+    host.querySelectorAll<HTMLButtonElement>('.remove-tc-input').forEach(btn => {
+      if (btn.dataset.bound) return;
+      btn.dataset.bound = 'true';
+      btn.addEventListener('click', () => {
+        const slot = btn.closest('.tc-input-slot');
+        const container = slot?.parentElement as HTMLElement | null;
+        slot?.remove();
+        if (container) this.reindexTcInputs(container);
+      });
+    });
+  }
+
+  private reindexTcInputs(container: HTMLElement) {
+    container.querySelectorAll('.tc-input-slot').forEach((slot, index) => {
+      const label = slot.querySelector('.tc-input-label');
+      if (label) label.textContent = `Input ${index + 1}`;
+    });
   }
 
   private flushStarterFields(host: HTMLElement) {
@@ -616,7 +942,10 @@ export class QuestionBankPanel {
     const type = (host.querySelector('#q-type') as HTMLSelectElement).value as Question['type'];
     const sectionCategory = (host.querySelector('#q-cat') as HTMLSelectElement).value;
     const chosenJob = (host.querySelector('#q-job') as HTMLSelectElement | null)?.value || this.jobId || '';
-    const chosenSection = (host.querySelector('#q-section') as HTMLSelectElement | null)?.value || '';
+    const chosenBankId = (host.querySelector('#q-bank') as HTMLSelectElement | null)?.value || this.activeFolderId || 'qb-1';
+
+    const stampedTags = questionBankStore.stampQuestionBank(q?.tags, chosenBankId);
+
     const body: Record<string, unknown> = {
       type,
       title: (host.querySelector('#q-title') as HTMLInputElement).value.trim(),
@@ -626,11 +955,10 @@ export class QuestionBankPanel {
       sectionCategory,
       category: CATEGORIES.find(c => c.type === type)?.label || 'MCQ',
       jobId: chosenJob,
-      sectionId: chosenSection,
       jobRole: this.jobs.find(j => j.id === chosenJob)?.title || null,
       stemFormat: (host.querySelector('#q-stem') as HTMLSelectElement).value,
       explanation: (host.querySelector('#q-explanation') as HTMLTextAreaElement)?.value || '',
-      tags: q?.tags || [],
+      tags: stampedTags,
       status: 'published',
     };
 
@@ -652,67 +980,106 @@ export class QuestionBankPanel {
       body.correctAnswers = correct;
     }
 
-    if (type === 'coding' || type === 'sql') {
-      body.constraints = (host.querySelector('#q-constraints') as HTMLTextAreaElement)?.value || '';
-      body.ioFormat = (host.querySelector('#q-io') as HTMLTextAreaElement)?.value || '';
-      if (type === 'coding') {
-        this.flushStarterFields(host);
-        const sampleCode: Record<string, LanguageStarter> = {};
-        Object.entries(this.starterDraft).forEach(([lang, parts]) => {
-          if ((parts.before || '').trim() || (parts.after || '').trim()) sampleCode[lang] = parts;
-        });
-        body.sampleCode = sampleCode;
-        body.language = this.starterLang;
-      }
-      const testCases: unknown[] = [];
-      host.querySelectorAll('[data-tc-row]').forEach(row => {
-        const id = (row as HTMLElement).getAttribute('data-tc-row') || '';
-        const inputs = Array.from(row.querySelectorAll('.tc-in')).map(
-          el => (el as HTMLTextAreaElement).value,
-        );
-        testCases.push({
-          id,
-          inputs: inputs.length ? inputs : [''],
-          input: (inputs.length ? inputs : ['']).join('\n'),
-          expectedOutput: (row.querySelector('.tc-out') as HTMLTextAreaElement).value,
-          isHidden: (row.querySelector('.tc-hidden') as HTMLInputElement).checked,
-          weight: parseInt((row.querySelector('.tc-weight') as HTMLInputElement).value, 10) || 1,
-        });
-      });
-      body.testCases = testCases;
-    }
-
     if (type === 'essay') {
       body.essayMinWords = parseInt((host.querySelector('#q-minw') as HTMLInputElement).value, 10) || 50;
       body.essayMaxWords = parseInt((host.querySelector('#q-maxw') as HTMLInputElement).value, 10) || 500;
-      body.rubric = (host.querySelector('#q-rubric') as HTMLTextAreaElement).value;
+      body.rubric = (host.querySelector('#q-rubric') as HTMLTextAreaElement).value.trim();
     }
 
     try {
-      if (q) await recruiterApi.updateQuestion(q.id, body as Partial<Question>);
-      else await recruiterApi.createQuestion(body as Partial<Question> & { type: string; title: string });
+      if (q) {
+        await recruiterApi.updateQuestion(q.id, body as Partial<Question>);
+      } else {
+        await recruiterApi.createQuestion(body as Partial<Question> & { type: string; title: string });
+      }
       close();
       await this.load();
-    } catch (e) {
-      alert(e instanceof ApiError ? e.message : 'Save failed.');
+    } catch (err) {
+      alert(err instanceof ApiError ? err.message : 'Save failed.');
     }
   }
 
-  private renderBulkUploadModal() {
+  private async saveCodingQuestion(q: Question | undefined, host: HTMLElement, close: () => void) {
+    const sectionCategory = (host.querySelector('#code-q-cat') as HTMLSelectElement).value;
+    const chosenJob = (host.querySelector('#code-q-job') as HTMLSelectElement | null)?.value || this.jobId || '';
+    const chosenBankId = (host.querySelector('#code-q-bank') as HTMLSelectElement | null)?.value || this.activeFolderId || 'qb-1';
+
+    this.flushStarterFields(host);
+    const sampleCode: Record<string, LanguageStarter> = {};
+    Object.entries(this.starterDraft).forEach(([lang, parts]) => {
+      if ((parts.before || '').trim() || (parts.after || '').trim()) sampleCode[lang] = parts;
+    });
+
+    const testCases: unknown[] = [];
+    host.querySelectorAll('[data-tc-row]').forEach(row => {
+      const id = (row as HTMLElement).getAttribute('data-tc-row') || '';
+      const inputs = Array.from(row.querySelectorAll('.tc-in')).map(
+        input => (input as HTMLTextAreaElement).value.replace(/\r\n/g, '\n'),
+      );
+      const expectedOutput = ((row.querySelector('.tc-out') as HTMLTextAreaElement)?.value || '').replace(/\r\n/g, '\n');
+      const isHidden = (row.querySelector('.tc-hidden') as HTMLInputElement)?.checked || false;
+      const weight = parseInt((row.querySelector('.tc-weight') as HTMLInputElement)?.value, 10) || 1;
+      if (expectedOutput || inputs.some(Boolean)) {
+        testCases.push({
+          id,
+          input: inputs.join('\n'),
+          inputs,
+          expectedOutput,
+          isHidden,
+          weight,
+        });
+      }
+    });
+
+    const stampedTags = questionBankStore.stampQuestionBank(q?.tags, chosenBankId);
+
+    const body: Record<string, unknown> = {
+      type: 'coding',
+      title: (host.querySelector('#code-q-title') as HTMLInputElement).value.trim(),
+      content: (host.querySelector('#code-q-content') as HTMLTextAreaElement).value.trim(),
+      difficulty: (host.querySelector('#code-q-diff') as HTMLSelectElement).value,
+      points: parseInt((host.querySelector('#code-q-points') as HTMLInputElement).value, 10) || 20,
+      sectionCategory,
+      category: 'Coding',
+      jobId: chosenJob,
+      jobRole: this.jobs.find(j => j.id === chosenJob)?.title || null,
+      constraints: (host.querySelector('#code-q-constraints') as HTMLTextAreaElement)?.value || '',
+      ioFormat: (host.querySelector('#code-q-io') as HTMLTextAreaElement)?.value || '',
+      sampleCode,
+      language: this.starterLang,
+      testCases,
+      tags: stampedTags,
+      status: 'published',
+    };
+
+    try {
+      if (q) {
+        await recruiterApi.updateQuestion(q.id, body as Partial<Question>);
+      } else {
+        await recruiterApi.createQuestion(body as Partial<Question> & { type: string; title: string });
+      }
+      close();
+      await this.load();
+    } catch (err) {
+      alert(err instanceof ApiError ? err.message : 'Save failed.');
+    }
+  }
+
+  private renderBulkUploadModal(bankIdTarget?: string) {
     const host = this.container.querySelector('#admin-modal-host') as HTMLElement;
     if (!host) return;
     let result: BulkQuestionImportResult | null = null;
-    let busy = false;
     let error = '';
+    let busy = false;
 
     const paint = () => {
       host.innerHTML = `
         <div class="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4">
-          <div class="glass-panel w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-3xl border border-slate-800 p-6 space-y-5">
-            <div class="flex items-center justify-between border-b border-slate-800 pb-4">
+          <div class="glass-panel w-full max-w-lg rounded-3xl border border-slate-800 p-6 space-y-5">
+            <div class="flex items-center justify-between border-b border-slate-800 pb-3">
               <div>
-                <h3 class="text-lg font-extrabold text-white">Bulk upload questions</h3>
-                <p class="text-xs text-slate-400 mt-0.5">Upload .xlsx / .xls / .csv — rows are parsed and stored in the question bank</p>
+                <h3 class="text-base font-extrabold text-white">Bulk upload questions</h3>
+                <p class="text-xs text-slate-400">Upload CSV / XLSX to add questions to this Question Bank.</p>
               </div>
               <button id="bulk-q-close" class="text-slate-400 hover:text-white font-bold">✕</button>
             </div>
@@ -748,7 +1115,7 @@ export class QuestionBankPanel {
                       <p class="text-red-400 mt-0.5">${esc((e.errors || []).join('; '))}</p>
                     </div>`).join('')}
                 </div>
-              ` : `<p class="text-xs text-emerald-300">All rows imported successfully.</p>`}
+              ` : `<p class="text-xs text-emerald-300">All rows imported successfully into Question Bank.</p>`}
             `}
 
             ${error ? `<p class="text-xs text-red-400 font-semibold">${esc(error)}</p>` : ''}
@@ -775,23 +1142,29 @@ export class QuestionBankPanel {
       jobSelect?.addEventListener('change', () => { chosenJobId = jobSelect.value; });
       const runUpload = async (file: File) => {
         const jobId = chosenJobId || jobSelect?.value || '';
-        if (!jobId) {
-          error = 'Select a job before uploading. Questions are assigned to that job.';
-          paint();
-          return;
-        }
         busy = true;
         error = '';
         paint();
         try {
-          result = await recruiterApi.bulkImportQuestions(file, jobId);
+          result = await recruiterApi.bulkImportQuestions(file, jobId || undefined);
+          // Auto-tag newly imported questions to current bank if specified
+          if (bankIdTarget && result.created > 0) {
+            await this.load();
+            for (const q of this.questions) {
+              if (jobId && q.jobId === jobId && !q.tags?.some(t => t.startsWith('bank:'))) {
+                const stamped = questionBankStore.stampQuestionBank(q.tags, bankIdTarget);
+                void recruiterApi.updateQuestion(q.id, { tags: stamped });
+              }
+            }
+          }
         } catch (e) {
-          error = e instanceof ApiError ? e.message : 'Upload failed.';
+          error = e instanceof ApiError ? e.message : 'Upload failed. Check format.';
         } finally {
           busy = false;
           paint();
         }
       };
+
       fileInput?.addEventListener('change', () => {
         const f = fileInput.files?.[0];
         if (f) void runUpload(f);

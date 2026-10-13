@@ -231,6 +231,8 @@ class Assessment(AuthBase):
     passing_percentage = Column(Integer, default=70, nullable=False)
     status = Column(String, default="active", nullable=False)  # active | draft | archived
     created_date = Column(String, nullable=True)               # YYYY-MM-DD display stamp
+    scheduled_date = Column(String, nullable=True)             # YYYY-MM-DD
+    start_time = Column(String, nullable=True)                 # e.g. "10:00 AM"
     created_at = Column(UTCDateTime, default=utcnow, nullable=False)
     updated_at = Column(UTCDateTime, default=utcnow, onupdate=utcnow, nullable=True)
 
@@ -311,6 +313,9 @@ class Job(AuthBase):
     assessment_id = Column(
         String, ForeignKey("assessments.id", ondelete="CASCADE"), unique=True, nullable=False, index=True,
     )
+    scheduled_date = Column(String, nullable=True)
+    start_time = Column(String, nullable=True)
+    total_duration_minutes = Column(Integer, default=60, nullable=True)
     created_at = Column(UTCDateTime, default=utcnow, nullable=False)
     updated_at = Column(UTCDateTime, default=utcnow, onupdate=utcnow, nullable=True)
 

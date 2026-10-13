@@ -738,15 +738,20 @@ export class SystemCheckComponent {
           <div class="w-20 h-20 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-400 flex items-center justify-center text-4xl mx-auto animate-pulse">
             ⏳
           </div>
+          <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-bold mx-auto mb-1">
+            <span>✓ Check-in Verification Completed</span>
+          </div>
           <div>
-            <h2 class="text-xl font-extrabold text-white">Identity Verification Pending Proctor Approval</h2>
+            <h2 class="text-xl font-extrabold text-white">Identity & Hardware Verification Confirmed</h2>
             <p class="text-xs text-slate-300 mt-2">
-              Your live photo and government ID have been saved as JPEG files on your candidate record.
+              Your live photo, government ID, and hardware diagnostics have been verified.
             </p>
           </div>
           <div class="p-4 rounded-2xl bg-slate-900 border border-slate-800 text-xs text-amber-300 font-semibold space-y-2">
-            <p>Security protocol active: please stay on this screen.</p>
-            <p class="text-slate-400 font-normal">Once a proctor verifies your photo and government ID, the exam will start.</p>
+            <p class="text-emerald-400 font-bold flex items-center justify-center gap-1.5">
+              <span>⏱️ Check-in window active (up to 30 min prior)</span>
+            </p>
+            <p class="text-slate-300 font-normal">Security protocol active: please stay on this screen. Your assessment will begin promptly at the scheduled start time once admitted by the proctor.</p>
           </div>
           <div class="flex items-center justify-center gap-3 text-xs text-slate-400 pt-2 border-t border-slate-800">
             <span class="inline-block w-2.5 h-2.5 rounded-full bg-amber-500 animate-ping"></span>
