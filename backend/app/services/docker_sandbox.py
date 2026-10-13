@@ -72,7 +72,7 @@ class DockerSandboxService:
             return code_exec.execute("sql", code, test_cases)
 
         docker_ready = is_docker_available()
-        if docker_ready and lang in _DOCKER_IMAGES:
+        if docker_ready and lang in _DOCKER_IMAGES and os.environ.get("APP_ENV") != "test":
             try:
                 return cls._run_in_docker(lang, code, test_cases)
             except Exception as exc:
