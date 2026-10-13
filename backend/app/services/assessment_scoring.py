@@ -45,6 +45,7 @@ def question_for_candidate(q: Question, option_ids: Optional[List[str]] = None) 
             visible_cases.append({
                 "id": tc.get("id"),
                 "input": tc.get("input"),
+                "inputs": tc.get("inputs") if isinstance(tc.get("inputs"), list) else None,
                 "expectedOutput": tc.get("expectedOutput"),
                 "isHidden": False,
                 "weight": tc.get("weight", 1),

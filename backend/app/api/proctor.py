@@ -12,7 +12,7 @@ from a proctor to that candidate. Only Proctors receive the monitor stream.
 """
 import base64
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
@@ -22,7 +22,8 @@ from sqlalchemy.orm import Session
 from app.api.deps import authenticate_websocket, require_portal
 from app.core.roles import PORTAL_PROCTOR, can_access_portal
 from app.db.session import SessionLocal, get_db
-from app.models.auth import Assessment, AssessmentSession, Candidate, utcnow
+from app.models.auth import Assessment, AssessmentSection, AssessmentSession, Candidate, utcnow
+from app.services.exam_timing import exam_time_left
 from app.services import identity_bucket
 
 router = APIRouter(tags=["Proctor"])
@@ -205,18 +206,31 @@ def _exam_for(db: Session, cand: Candidate) -> Optional[Assessment]:
     return db.get(Assessment, cand.assessment_id)
 
 
-def _time_left_seconds(db: Session, cand: Candidate, duration_minutes: int) -> int:
+def _duration_minutes(db: Session, exam: Optional[Assessment]) -> int:
+    if exam is None:
+        return 60
+    if exam.total_duration_minutes:
+        return int(exam.total_duration_minutes)
+    sections = (
+        db.query(AssessmentSection)
+        .filter(AssessmentSection.assessment_id == exam.id)
+        .all()
+    )
+    total = sum(int(section.time_limit_minutes or 0) for section in sections)
+    return total or 60
+
+
+def _exam_clock(db: Session, cand: Candidate, exam: Optional[Assessment]) -> dict:
+    """Countdown from the moment the candidate enters the exam, for the full allotment."""
     session = (
         db.query(AssessmentSession)
         .filter(AssessmentSession.candidate_id == cand.id)
         .order_by(AssessmentSession.created_at.desc())
         .first()
     )
-    start = session.started_at if session and session.started_at else None
-    if start is None:
-        return duration_minutes * 60
-    remaining = int((start + timedelta(minutes=duration_minutes) - utcnow()).total_seconds())
-    return max(0, remaining)
+    started = session.exam_started_at if session else None
+    seconds, running = exam_time_left(started, _duration_minutes(db, exam), utcnow())
+    return {"timeLeftSeconds": seconds, "examStarted": running}
 
 
 def _queue_row(db: Session, cand: Candidate) -> dict:
@@ -260,13 +274,14 @@ def live_sessions(_: object = Depends(_proctor), db: Session = Depends(get_db)):
     items = []
     for cand in rows:
         exam = _exam_for(db, cand)
-        minutes = exam.total_duration_minutes if exam else 60
+        clock = _exam_clock(db, cand, exam)
         items.append({
             "id": cand.id,
             "name": cand.name,
             "email": cand.email,
             "examTitle": exam.title if exam else "",
-            "timeLeftSeconds": _time_left_seconds(db, cand, minutes),
+            "timeLeftSeconds": clock["timeLeftSeconds"],
+            "examStarted": clock["examStarted"],
             "violations": manager.violations.get(cand.id, 0),
             "lastEvent": manager.last_event.get(cand.id, ""),
         })

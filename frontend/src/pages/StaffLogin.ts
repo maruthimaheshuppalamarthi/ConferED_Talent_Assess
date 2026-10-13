@@ -178,6 +178,7 @@ export class StaffLoginPage {
           return;
         }
         this.run(submit, async () => {
+          if (submit) submit.innerHTML = '<span>Sending code…</span>';
           const challenge = await authApi.login(this.portal, email, password);
           form.challengeId = challenge.challengeId;
           form.otpDestination = challenge.otpDestination;

@@ -40,10 +40,19 @@ export interface QuestionOption {
 
 export interface TestCase {
   id: string;
+  /** Joined stdin, kept so older readers still see one block. */
   input: string;
+  /** Separate values for this case. Each one is one line of stdin, in order. */
+  inputs?: string[];
   expectedOutput: string;
   isHidden: boolean;
   weight: number;
+}
+
+/** Locked code the candidate must write between. Empty sides mean that side is absent. */
+export interface LanguageStarter {
+  before: string;
+  after: string;
 }
 
 export type QuestionType =
@@ -63,8 +72,10 @@ export interface Question {
   content: string;
   options?: QuestionOption[];
   correctAnswers?: string[];
-  sampleCode?: Record<string, string>;
+  sampleCode?: Record<string, string | LanguageStarter>;
   language?: string;
+  /** Recruiter-only solution note. Never shown on the candidate exam. */
+  explanation?: string;
   testCases?: TestCase[];
   essayMinWords?: number;
   essayMaxWords?: number;
@@ -163,6 +174,7 @@ export interface ExecutionResult {
     testCaseId: string;
     passed: boolean;
     input: string;
+    inputs?: string[];
     expected: string;
     actual: string;
     isHidden: boolean;

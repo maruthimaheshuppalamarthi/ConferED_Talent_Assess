@@ -1,12 +1,13 @@
 import logging
+import re
 import smtplib
 import socket
 import ssl
 import threading
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from email.utils import formataddr
-from html import escape
+from email.utils import formataddr, formatdate, make_msgid
+from html import escape, unescape
 from typing import Optional, Tuple
 
 from app.core.config import settings
@@ -61,13 +62,28 @@ def _quietly_quit(server: smtplib.SMTP) -> None:
         pass
 
 
+def _plain_from_html(body_html: str) -> str:
+    """A text alternative so mailbox filters do not drop an HTML-only invitation."""
+    text = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", body_html or "")
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+    text = re.sub(r"(?i)</p>|</tr>|</h\d>", "\n", text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = unescape(text)
+    lines = [" ".join(line.split()) for line in text.splitlines()]
+    return "\n".join(line for line in lines if line).strip()
+
+
 def send_email_detailed(to_email: str, subject: str, body_html: str,
                         sender_email: Optional[str] = None, app_password: Optional[str] = None,
-                        host: Optional[str] = None, port: Optional[int] = None) -> Tuple[bool, str]:
+                        host: Optional[str] = None, port: Optional[int] = None,
+                        copy_to: Optional[str] = None) -> Tuple[bool, str]:
     """
     Send an HTML email through the gateway configured by the System Admin (database, then .env fallback).
     Never raises. Returns (ok, message) where message is a safe explanation when ok is False.
+    The message is sent only to to_email. copy_to is ignored so the recruiter mailbox
+    is not used as the recipient.
     """
+    del copy_to
     cfg = rt.email_config()
     sender = sender_email or cfg.sender_email
     password = (app_password or cfg.password or "").replace(" ", "")
@@ -77,19 +93,30 @@ def send_email_detailed(to_email: str, subject: str, body_html: str,
         logger.warning("SMTP credentials missing - email to %s not sent", to_email)
         return False, "No sender address or SMTP password is configured (System Admin > Settings > Email)."
 
+    recipient = (to_email or "").strip()
+    # The form address is the only envelope recipient. A second copy to the
+    # sender was keeping the message in the recruiter mailbox.
     try:
         msg = MIMEMultipart("alternative")
         msg["Subject"] = subject
         msg["From"] = formataddr((cfg.sender_name, sender))
-        msg["To"] = to_email
-        msg.attach(MIMEText(body_html, "html"))
+        msg["To"] = recipient
+        msg["Reply-To"] = sender
+        msg["Date"] = formatdate(localtime=True)
+        msg["Message-ID"] = make_msgid(domain=sender.split("@")[-1] if "@" in sender else None)
+        msg.attach(MIMEText(_plain_from_html(body_html), "plain", "utf-8"))
+        msg.attach(MIMEText(body_html, "html", "utf-8"))
 
         server = _open_session(host, port, sender, password)
         try:
-            server.sendmail(sender, [to_email], msg.as_string())
+            refused = server.sendmail(sender, [recipient], msg.as_string())
         finally:
             _quietly_quit(server)
-        return True, "Email sent."
+        if refused:
+            logger.error("Email delivery refused for %s", ", ".join(refused))
+            return False, "The mail server refused the recipient address."
+        logger.info("SMTP accepted invitation for %s", recipient)
+        return True, f"Email accepted for {recipient}."
     except Exception as exc:  # network / auth problems must not break the API
         logger.error("Email delivery to %s failed: %s: %s", to_email, type(exc).__name__, exc)
         return False, _explain(exc)
@@ -193,6 +220,7 @@ def candidate_invite_email(
     duration_minutes: int = 60,
     deadline_label: str = "",
     guidelines: str = "",
+    to_email: str = "",
 ) -> tuple:
     """Invitation with duration, deadline, unique link, and Begin Assessment CTA."""
     subject = f"Invitation: {assessment_title}"
@@ -207,8 +235,9 @@ def candidate_invite_email(
     )
     body = _shell(
         f"Hello {escape(name)},",
-        f"""<p style="color: #94a3b8; font-size: 14px; line-height: 1.6;">
+        f"""        <p style="color: #94a3b8; font-size: 14px; line-height: 1.6;">
         You have been invited to complete <strong style="color:#e2e8f0">{escape(assessment_title)}</strong>.</p>
+        {f'<p style="color: #94a3b8; font-size: 14px;">This message was sent to <strong style="color:#e2e8f0">{escape(to_email)}</strong>.</p>' if to_email else ''}
         <table style="width:100%;border-collapse:collapse;margin:16px 0;background:#0f172a;border-radius:10px;padding:12px;">
           <tr><td style="padding:6px 0;color:#94a3b8;font-size:13px;">Assessment time</td>
               <td style="padding:6px 0;color:#e2e8f0;font-size:13px;font-weight:600;text-align:right;">{int(duration_minutes)} minutes</td></tr>

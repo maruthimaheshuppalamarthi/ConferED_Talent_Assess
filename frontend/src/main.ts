@@ -1,3 +1,4 @@
+import { flushCodingEditor } from './components/MonacoEditorComponent';
 import { FooterComponent } from './components/Footer';
 import { NavbarComponent } from './components/Navbar';
 import { SidebarComponent } from './components/Sidebar';
@@ -12,6 +13,7 @@ import { Route, currentRoute, portalHomePath, router } from './router';
 import { applyPathTab, resetPortalTabs } from './services/portalNav';
 import { authApi } from './services/authApi';
 import { candidateAssist } from './services/candidateAssist';
+import { readExamSnapshot } from './services/examDraft';
 import { store } from './services/store';
 import { Portal } from './types';
 import './styles/index.css';
@@ -167,6 +169,20 @@ class App {
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
+  const invite = new URLSearchParams(window.location.search).get('invite');
+  const snap = readExamSnapshot();
+  if (invite && snap?.inviteToken === invite && authApi.getCandidateToken()) {
+    store.hydrateExam(snap);
+  } else if (invite && snap?.inviteToken === invite && snap.codeDrafts) {
+    store.seedCodeDrafts(snap.codeDrafts);
+  } else if (snap && invite && snap.inviteToken !== invite) {
+    authApi.clearCandidateSession();
+  }
+  window.addEventListener('pagehide', () => {
+    flushCodingEditor();
+    store.flushExamProgress();
+  });
+
   const app = new App();
   app.render();
 

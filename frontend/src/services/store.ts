@@ -1,6 +1,7 @@
 import { Assessment, Candidate, CandidateResult, LiveCandidate, Portal, Question, SystemSettings, ProctoringViolation } from '../types';
 import { initialSettings, sampleAssessments, sampleCandidateResults, sampleCandidates, sampleLiveCandidates, sampleQuestions } from './mockData';
 import { authApi, AuthUser, CandidateSession } from './authApi';
+import { CodeDraft, ExamSnapshot, writeExamSnapshot } from './examDraft';
 import { sanitizeAssessmentQuestions } from './questionSanitize';
 
 export interface CandidateFeedback {
@@ -40,6 +41,7 @@ export interface AppState {
   sectionEndsAtMs: number | null;
   candidateAnswers: Record<string, any>; // questionId -> answer
   codeSubmissions: Record<string, { code: string; language: string; executionTimeMs?: number; passedCount?: number; totalCount?: number }>;
+  codeDrafts: Record<string, CodeDraft>;
   flaggedQuestions: Set<string>;
   candidateFeedback: CandidateFeedback | null;
   
@@ -58,6 +60,8 @@ class Store {
   private state: AppState;
   private listeners: (() => void)[] = [];
   private activeStreams: MediaStream[] = [];
+  private positionRestored = false;
+  private progressTimer: number | null = null;
 
   constructor() {
     const params = new URLSearchParams(window.location.search);
@@ -91,6 +95,7 @@ class Store {
       sectionEndsAtMs: null,
       candidateAnswers: {},
       codeSubmissions: {},
+      codeDrafts: {},
       flaggedQuestions: new Set(),
       candidateFeedback: null,
       
@@ -237,19 +242,136 @@ class Store {
   /** Load sanitized assessment from API (no correct answers). */
   public async loadCandidateAssessment(assessmentId: string) {
     try {
-      const data = await authApi.fetchJson<Assessment>('/candidate/assessment', 'GET', undefined, 'candidate');
+      const data = await authApi.fetchJson<Assessment & {
+        examStartedAt?: string | null;
+        progress?: {
+          sectionIndex?: number;
+          questionIndex?: number;
+          sectionEndsAt?: string | null;
+          answers?: Record<string, unknown>;
+          codeDrafts?: Record<string, CodeDraft>;
+          flagged?: string[];
+        } | null;
+      }>('/candidate/assessment', 'GET', undefined, 'candidate');
       const sanitized = sanitizeAssessmentQuestions(data);
       const idx = this.state.assessments.findIndex(a => a.id === sanitized.id || a.id === assessmentId);
       if (idx >= 0) this.state.assessments[idx] = sanitized;
       else this.state.assessments.unshift(sanitized);
       this.state.activeAssessmentId = sanitized.id;
       this.state.assessmentReady = true;
-      if (this.state.examStarted) this.jumpToFirstQuestion();
+      this.applyServerProgress(data);
+      if (this.state.examStarted && this.state.sectionEndsAtMs == null) this.jumpToFirstQuestion(true);
       this.notify();
     } catch {
       this.state.assessmentReady = false;
       this.notify();
     }
+  }
+
+  /** Put a refresh copy of the attempt back into memory before the first paint. */
+  public hydrateExam(snap: ExamSnapshot) {
+    this.state.activeCandidateId = snap.candidateId;
+    if (snap.assessmentId) this.state.activeAssessmentId = snap.assessmentId;
+    this.state.otpVerified = snap.otpVerified;
+    this.state.systemCheckCompleted = snap.systemCheckCompleted;
+    this.state.examStarted = snap.examStarted;
+    this.state.examCompleted = snap.examCompleted;
+    this.state.currentSectionIndex = snap.currentSectionIndex || 0;
+    this.state.currentQuestionIndex = snap.currentQuestionIndex || 0;
+    this.state.sectionEndsAtMs = snap.sectionEndsAtMs;
+    this.state.sectionTimeRemainingSeconds = this.getSectionRemainingSeconds();
+    this.state.candidateAnswers = { ...(snap.answers || {}) };
+    this.state.codeDrafts = snap.codeDrafts || {};
+    this.state.flaggedQuestions = new Set(snap.flagged || []);
+    this.positionRestored = true;
+    if (snap.examStarted && !snap.examCompleted) {
+      void authApi.fetchJson('/candidate/exam/start', 'POST', {}, 'candidate').catch(() => null);
+      void this.loadCandidateAssessment(this.state.activeAssessmentId);
+    }
+  }
+
+  /** Keep typed code when the token is gone and the candidate must sign in again. */
+  public seedCodeDrafts(drafts: Record<string, CodeDraft>) {
+    this.state.codeDrafts = drafts || {};
+  }
+
+  private applyServerProgress(data: {
+    examStartedAt?: string | null;
+    progress?: {
+      sectionIndex?: number;
+      questionIndex?: number;
+      sectionEndsAt?: string | null;
+      answers?: Record<string, unknown>;
+      codeDrafts?: Record<string, CodeDraft>;
+      flagged?: string[];
+    } | null;
+  }) {
+    const progress = data.progress;
+    if (data.examStartedAt && !this.state.examCompleted) {
+      this.state.examStarted = true;
+      this.state.systemCheckCompleted = true;
+    }
+    if (!progress) return;
+    const localHasCode = Object.values(this.state.codeDrafts).some(draft =>
+      Object.values(draft.files || {}).some(text => text.length > 0));
+    if (!localHasCode && progress.codeDrafts) this.state.codeDrafts = progress.codeDrafts;
+    if (!Object.keys(this.state.candidateAnswers).length && progress.answers) {
+      this.state.candidateAnswers = { ...progress.answers };
+    }
+    if (this.state.sectionEndsAtMs == null && progress.sectionEndsAt) {
+      const ms = Date.parse(progress.sectionEndsAt);
+      if (!Number.isNaN(ms)) this.state.sectionEndsAtMs = ms;
+    }
+    if (!this.positionRestored) {
+      if (typeof progress.sectionIndex === 'number') this.state.currentSectionIndex = progress.sectionIndex;
+      if (typeof progress.questionIndex === 'number') this.state.currentQuestionIndex = progress.questionIndex;
+      if (progress.flagged) this.state.flaggedQuestions = new Set(progress.flagged);
+      this.positionRestored = true;
+    }
+  }
+
+  private progressBody() {
+    return {
+      sectionIndex: this.state.currentSectionIndex,
+      questionIndex: this.state.currentQuestionIndex,
+      sectionEndsAt: this.state.sectionEndsAtMs ? new Date(this.state.sectionEndsAtMs).toISOString() : null,
+      answers: this.state.candidateAnswers,
+      codeDrafts: this.state.codeDrafts,
+      flagged: Array.from(this.state.flaggedQuestions),
+    };
+  }
+
+  private persistExam(immediate = false) {
+    const invite = this.state.candidateInviteToken;
+    if (!invite || !this.state.otpVerified) return;
+    writeExamSnapshot({
+      inviteToken: invite,
+      savedAt: Date.now(),
+      candidateId: this.state.activeCandidateId,
+      assessmentId: this.state.activeAssessmentId,
+      otpVerified: this.state.otpVerified,
+      systemCheckCompleted: this.state.systemCheckCompleted,
+      examStarted: this.state.examStarted,
+      examCompleted: this.state.examCompleted,
+      currentSectionIndex: this.state.currentSectionIndex,
+      currentQuestionIndex: this.state.currentQuestionIndex,
+      sectionEndsAtMs: this.state.sectionEndsAtMs,
+      answers: this.state.candidateAnswers,
+      codeDrafts: this.state.codeDrafts,
+      flagged: Array.from(this.state.flaggedQuestions),
+    });
+    if (!this.state.examStarted || this.state.examCompleted) return;
+    if (this.progressTimer) window.clearTimeout(this.progressTimer);
+    this.progressTimer = window.setTimeout(() => {
+      this.progressTimer = null;
+      void authApi.fetchJson('/candidate/progress', 'PUT', this.progressBody(), 'candidate').catch(() => null);
+    }, immediate ? 0 : 700);
+  }
+
+  public flushExamProgress() {
+    if (!this.state.otpVerified || !this.state.examStarted || this.state.examCompleted) return;
+    this.persistExam();
+    authApi.flushJson('/candidate/progress', this.progressBody(), 'candidate');
   }
 
   public updateSettings(newSettings: Partial<SystemSettings>) {
@@ -263,13 +385,22 @@ class Store {
   }
 
   public startExam() {
+    if (this.state.examStarted && this.state.sectionEndsAtMs && this.state.sectionEndsAtMs > Date.now()) {
+      this.positionRestored = true;
+      this.persistExam(true);
+      this.notify();
+      return;
+    }
     this.state.examStarted = true;
     this.state.examCompleted = false;
     this.state.sectionEndsAtMs = null;
     this.terminateArmed = false;
     this.lastCountedViolationAt = {};
     this.jumpToFirstQuestion(true);
+    this.positionRestored = true;
     this.notify();
+    void authApi.fetchJson('/candidate/exam/start', 'POST', {}, 'candidate').catch(() => null);
+    this.persistExam(true);
     if (this.state.activeCandidateId) {
       void this.loadCandidateAssessment(this.state.activeAssessmentId);
     }
@@ -290,6 +421,7 @@ class Store {
     }
     this.state.sectionEndsAtMs = Date.now() + seconds * 1000;
     this.state.sectionTimeRemainingSeconds = seconds;
+    this.persistExam();
   }
 
   public jumpToFirstQuestion(resetClock = false) {
@@ -317,14 +449,42 @@ class Store {
 
   public setAnswer(questionId: string, answer: any, shouldNotify: boolean = true) {
     this.state.candidateAnswers[questionId] = answer;
+    this.persistExam();
     if (shouldNotify) {
       this.notify();
     }
   }
 
+  /** Remember editor text without re-rendering, so a refresh or fullscreen exit keeps every character. */
+  public noteCodeDraft(questionId: string, language: string, code: string) {
+    const prev = this.state.codeDrafts[questionId] || { language, files: {} };
+    prev.language = language;
+    prev.files = { ...prev.files, [language]: code };
+    this.state.codeDrafts[questionId] = prev;
+    this.state.codeSubmissions[questionId] = {
+      ...(this.state.codeSubmissions[questionId] || {}),
+      code,
+      language,
+    };
+    this.state.candidateAnswers[questionId] = { code, language };
+    this.persistExam();
+  }
+
+  public recallCode(questionId: string, language: string): string | null {
+    const text = this.state.codeDrafts[questionId]?.files?.[language];
+    return typeof text === 'string' ? text : null;
+  }
+
+  public recallLanguage(questionId: string): string | null {
+    return this.state.codeDrafts[questionId]?.language || null;
+  }
+
   public setCodeSubmission(questionId: string, submission: { code: string; language: string; executionTimeMs?: number; passedCount?: number; totalCount?: number }) {
-    this.state.codeSubmissions[questionId] = submission;
-    this.notify();
+    this.noteCodeDraft(questionId, submission.language, submission.code);
+    this.state.codeSubmissions[questionId] = {
+      ...this.state.codeSubmissions[questionId],
+      ...submission,
+    };
   }
 
   public toggleFlagQuestion(questionId: string) {
@@ -333,6 +493,7 @@ class Store {
     } else {
       this.state.flaggedQuestions.add(questionId);
     }
+    this.persistExam();
     this.notify();
   }
 
@@ -340,6 +501,7 @@ class Store {
     const section = this.getActiveAssessment()?.sections[this.state.currentSectionIndex];
     if (section && this.state.currentQuestionIndex < section.questions.length - 1) {
       this.state.currentQuestionIndex++;
+      this.persistExam();
       this.notify();
     }
   }
@@ -347,6 +509,7 @@ class Store {
   public prevQuestion() {
     if (this.state.currentQuestionIndex > 0) {
       this.state.currentQuestionIndex--;
+      this.persistExam();
       this.notify();
     }
   }
@@ -383,9 +546,18 @@ class Store {
       cand.assessmentCompleted = true;
     }
 
+    const answers: Record<string, unknown> = { ...this.state.candidateAnswers };
+    Object.entries(this.state.codeDrafts).forEach(([questionId, draft]) => {
+      const language = draft.language;
+      answers[questionId] = {
+        code: draft.files[language] ?? '',
+        language,
+        files: draft.files,
+      };
+    });
     // Server grades objective items; candidate UI never receives scores/keys.
     void authApi.fetchJson('/candidate/submit', 'POST', {
-      answers: this.state.candidateAnswers,
+      answers,
     }, 'candidate').catch(() => null);
 
     this.notify();
@@ -396,14 +568,26 @@ class Store {
       rating,
       comment: feedbackText,
     }, 'candidate');
+    this.markFeedbackSaved(rating, feedbackText);
+  }
+
+  /** Save the rating and close the exam tab. The request survives the tab closing. */
+  public finishAndClose(rating: number, feedbackText: string) {
+    authApi.postKeepalive('/candidate/feedback', {
+      rating,
+      comment: feedbackText,
+    }, 'candidate');
+    this.markFeedbackSaved(rating, feedbackText);
+  }
+
+  private markFeedbackSaved(rating: number, feedbackText: string) {
     this.state.candidateFeedback = {
       rating,
       feedbackText,
       tags: [],
       submittedAt: new Date().toISOString()
     };
-    const { candidateAssist } = await import('./candidateAssist');
-    candidateAssist.reportFinished();
+    void import('./candidateAssist').then(({ candidateAssist }) => candidateAssist.reportFinished());
     if (document.fullscreenElement) document.exitFullscreen().catch(() => undefined);
     this.notify();
   }

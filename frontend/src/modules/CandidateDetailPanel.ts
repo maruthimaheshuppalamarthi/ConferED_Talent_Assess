@@ -209,7 +209,12 @@ export class CandidateDetailPanel {
 
   private async reinvite() {
     if (!this.row) return;
-    if (!confirm(`Issue a new invite for ${this.row.name}?`)) return;
+    if (!confirm(`Send ${this.row.name} a new exam link and a new passcode? The previous link will stop working.`)) return;
+    const btn = this.container.querySelector('#cd-reinvite') as HTMLButtonElement | null;
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Sending…';
+    }
     try {
       const invite = await authApi.createInvite({
         name: this.row.name,
@@ -219,11 +224,34 @@ export class CandidateDetailPanel {
         expiresInHours: 48,
         candidateId: this.row.id,
       });
-      await navigator.clipboard.writeText(invite.link).catch(() => {});
-      alert(`New invitation sent${invite.devOtp ? `\nDEV OTP: ${invite.devOtp}` : ''}`);
+      const deadline = Date.now() + 20000;
+      let status = 'PENDING';
+      let message = '';
+      while (Date.now() < deadline) {
+        await new Promise(resolve => window.setTimeout(resolve, 1000));
+        try {
+          const delivery = await authApi.inviteDelivery(invite.inviteId);
+          status = delivery.deliveryStatus;
+          message = delivery.message;
+          if (status === 'SENT' || status === 'FAILED' || status === 'STARTED') break;
+        } catch {
+          /* the invite is already saved; keep waiting for the mail result */
+        }
+      }
+      if (status === 'SENT' || status === 'STARTED') {
+        alert(`A new exam link and passcode were emailed to ${invite.otpDestination}. Earlier links for this assessment no longer work.`);
+      } else if (status === 'FAILED') {
+        alert(message || 'The new invitation was saved, but the email was not delivered. Check the email settings and try again.');
+      } else {
+        alert(`The new invitation is saved for ${invite.otpDestination}. The email is still going out — check the inbox, then Spam.`);
+      }
       await this.load();
     } catch (e) {
       alert(e instanceof Error ? e.message : 'Invite failed.');
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = 'Resend invite';
+      }
     }
   }
 }

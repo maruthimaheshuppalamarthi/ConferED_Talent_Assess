@@ -9,11 +9,11 @@ export function sanitizeQuestionForCandidate(q: Question): Question {
   }));
   const testCases: TestCase[] = (q.testCases || []).map(tc => {
     if (tc.isHidden) {
-      return { id: tc.id, input: '', expectedOutput: '', isHidden: true, weight: tc.weight };
+      return { id: tc.id, input: '', inputs: [], expectedOutput: '', isHidden: true, weight: tc.weight };
     }
     return { ...tc };
   });
-  const { correctAnswers: _c, rubric: _r, ...rest } = q as Question & { rubric?: string };
+  const { correctAnswers: _c, rubric: _r, explanation: _e, ...rest } = q as Question & { rubric?: string };
   return {
     ...rest,
     options,

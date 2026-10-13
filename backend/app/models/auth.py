@@ -340,6 +340,7 @@ class Question(AuthBase):
     stem_format = Column(String, default="plain", nullable=False)  # plain | markdown
     coding_meta = Column(JSONType, nullable=True)  # constraints, io_format, time_limit_ms, memory_limit_kb
     rubric = Column(Text, nullable=True)
+    explanation = Column(Text, nullable=True)  # recruiter notes; never sent to the candidate exam
     status = Column(String, default="published", nullable=False)  # draft | published
     created_at = Column(UTCDateTime, default=utcnow, nullable=False)
     updated_at = Column(UTCDateTime, default=utcnow, onupdate=utcnow, nullable=True)
@@ -440,7 +441,9 @@ class AssessmentSession(AuthBase):
     assessment_id = Column(String, nullable=False, index=True)
     drawn_question_ids = Column(JSONType, nullable=True)  # { sectionId: [questionId, ...] }
     option_order = Column(JSONType, nullable=True)  # { questionId: [optionId, ...] } frozen display order
-    started_at = Column(UTCDateTime, nullable=True)
+    started_at = Column(UTCDateTime, nullable=True)  # when the paper was frozen, not when the clock starts
+    exam_started_at = Column(UTCDateTime, nullable=True)  # when the candidate entered the exam
+    progress = Column(JSONType, nullable=True)  # answers, code drafts, section position
     completed_at = Column(UTCDateTime, nullable=True)
     created_at = Column(UTCDateTime, default=utcnow, nullable=False)
 
