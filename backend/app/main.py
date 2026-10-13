@@ -127,17 +127,8 @@ def read_root():
 @app.post("/api/v1/code/execute")
 def execute_code_endpoint(req: CodeRunRequest, principal: dict = Depends(get_current_principal)):
     """
-    Executes submitted code safely in sandbox container.
+    Executes submitted code safely in runner.
     Requires any authenticated principal (verified candidate or staff).
     """
-    if req.language == "python":
-        res = DockerSandboxService.run_python_code(req.code, req.testCases)
-        return res
-
-    return {
-        "passed": True,
-        "stdout": "Executed",
-        "executionTimeMs": 120,
-        "memoryUsedKb": 12800,
-        "testResults": [],
-    }
+    from app.services.docker_sandbox import DockerSandboxService
+    return DockerSandboxService.execute(req.language, req.code, req.testCases)

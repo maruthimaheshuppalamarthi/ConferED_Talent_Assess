@@ -134,12 +134,17 @@ class JobBody(BaseModel):
     status: Optional[str] = "draft"
     totalDurationMinutes: Optional[int] = 60
     passingPercentage: Optional[int] = 70
+    scheduledDate: Optional[str] = None
+    startTime: Optional[str] = None
 
 
 class JobPatch(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
     status: Optional[str] = None
+    totalDurationMinutes: Optional[int] = None
+    scheduledDate: Optional[str] = None
+    startTime: Optional[str] = None
 
 
 class AssessmentBody(BaseModel):
@@ -152,6 +157,8 @@ class AssessmentBody(BaseModel):
     passingPercentage: Optional[int] = 70
     status: Optional[str] = "draft"
     createdDate: Optional[str] = None
+    scheduledDate: Optional[str] = None
+    startTime: Optional[str] = None
     sections: Optional[List[Dict[str, Any]]] = None
 
 
@@ -162,23 +169,33 @@ class AssessmentPatch(BaseModel):
     totalDurationMinutes: Optional[int] = None
     passingPercentage: Optional[int] = None
     status: Optional[str] = None
+    scheduledDate: Optional[str] = None
+    startTime: Optional[str] = None
     sections: Optional[List[Dict[str, Any]]] = None
 
 
 # ------------------------------------------------------------------ pipeline / stages
 @router.get("/pipeline")
-def get_pipeline(actor: StaffUser = Depends(require_portal(PORTAL_RECRUITER)), db: Session = Depends(get_db)):
-    items, total = pipeline.list_pipeline(db)
+def get_pipeline(
+    job_id: Optional[str] = Query(None),
+    actor: StaffUser = Depends(require_portal(PORTAL_RECRUITER)),
+    db: Session = Depends(get_db),
+):
+    items, total = pipeline.list_pipeline(db, job_id=job_id)
     return {"items": items, "total": total, "counts": pipeline.stage_counts(db)}
 
 
 @router.get("/pipeline/stages/{stage}")
-def get_pipeline_stage(stage: str, actor: StaffUser = Depends(require_portal(PORTAL_RECRUITER)),
-                       db: Session = Depends(get_db)):
+def get_pipeline_stage(
+    stage: str,
+    job_id: Optional[str] = Query(None),
+    actor: StaffUser = Depends(require_portal(PORTAL_RECRUITER)),
+    db: Session = Depends(get_db),
+):
     status_label = pipeline.resolve_stage(stage)
     if not status_label:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"Unknown stage '{stage}'")
-    items, total = pipeline.list_pipeline(db, status=status_label)
+    items, total = pipeline.list_pipeline(db, status=status_label, job_id=job_id)
     return {"stage": status_label, "slug": stage, "items": items, "total": total,
             "counts": pipeline.stage_counts(db)}
 
@@ -596,14 +613,14 @@ def create_invite(req: InviteCreateRequest, request: Request,
     assessment = db.query(Assessment).filter(Assessment.id == req.assessmentId).first()
     title = assessment.title if assessment else "Online Assessment"
     duration = assessment.total_duration_minutes if assessment else 60
+    sched_date = getattr(assessment, "scheduled_date", None) or ""
+    sched_time = getattr(assessment, "start_time", None) or ""
     deadline_label = invite.expires_at.strftime("%Y-%m-%d %H:%M UTC")
     subject, body = email_service.candidate_invite_email(
         invite.name, link, code, rt.get_int("otpExpireMinutes"), f"in {expires_in_hours} hours",
         assessment_title=title, duration_minutes=duration, deadline_label=deadline_label,
-        to_email=email,
+        to_email=email, scheduled_date=sched_date, start_time=sched_time,
     )
-    if previous:
-        subject = f"New invitation: {title}"
 
     invite_id = invite.id
 

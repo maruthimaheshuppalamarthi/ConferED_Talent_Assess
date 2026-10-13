@@ -92,3 +92,33 @@ def test_missing_compiler_does_not_pretend_to_pass():
     assert result["passed"] is False
     assert "not installed" in result["stderr"].lower()
     assert result["testResults"][0]["actual"] != "1"
+
+
+def test_sql_execution_evaluates_query_against_test_cases():
+    setup = (
+        "CREATE TABLE users (id INT, name TEXT);\n"
+        "INSERT INTO users VALUES (1, 'Alice');\n"
+        "INSERT INTO users VALUES (2, 'Bob');\n"
+    )
+    result = execute(
+        "sql",
+        "SELECT name FROM users WHERE id = 1;",
+        [{"id": "tc-1", "setup": setup, "expectedOutput": "('Alice',)", "isHidden": False}],
+    )
+    assert result["passed"] is True
+    assert result["testResults"][0]["actual"] == "('Alice',)"
+
+
+def test_python_function_without_stdin_is_invoked_via_harness():
+    code = (
+        "def add_nums(pair):\n"
+        "    return pair[0] + pair[1]\n"
+    )
+    result = execute(
+        "python",
+        code,
+        [{"id": "tc-1", "input": "[10, 20]", "expectedOutput": "30", "isHidden": False}],
+    )
+    assert result["passed"] is True
+    assert result["testResults"][0]["actual"].strip() == "30"
+

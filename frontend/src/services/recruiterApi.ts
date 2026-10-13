@@ -60,12 +60,23 @@ export interface CandidateRow {
   sectionScores?: CandidateResult['sectionScores'] | null;
   result?: CandidateResult | null;
   paper?: {
+    id?: string;
     name: string;
     questions: {
+      id?: string;
       number: number;
       title: string;
+      content?: string;
+      points?: number;
+      explanation?: string;
+      difficulty?: string;
       type: string;
-      options: { text: string; correct: boolean }[];
+      options: { id?: string; text: string; correct: boolean }[];
+      candidateAnswer?: any;
+      correctAnswers?: string[];
+      sampleCode?: any;
+      language?: string;
+      testCases?: any;
     }[];
   }[] | null;
 }
@@ -140,6 +151,9 @@ export interface JobItem {
   status: JobStatus;
   assessmentId: string;
   sectionCount: number;
+  totalDurationMinutes?: number;
+  scheduledDate?: string | null;
+  startTime?: string | null;
   createdAt?: string | null;
 }
 
@@ -153,8 +167,14 @@ export interface BulkQuestionImportResult {
 }
 
 export const recruiterApi = {
-  pipeline: () => get<PipelineResponse>('/recruiter/pipeline'),
-  pipelineStage: (slug: PipelineStageSlug) => get<PipelineResponse>(`/recruiter/pipeline/stages/${slug}`),
+  pipeline: (jobId?: string) => {
+    const qs = jobId ? `?job_id=${encodeURIComponent(jobId)}` : '';
+    return get<PipelineResponse>(`/recruiter/pipeline${qs}`);
+  },
+  pipelineStage: (slug: PipelineStageSlug, jobId?: string) => {
+    const qs = jobId ? `?job_id=${encodeURIComponent(jobId)}` : '';
+    return get<PipelineResponse>(`/recruiter/pipeline/stages/${slug}${qs}`);
+  },
 
   candidate: (id: string) => get<CandidateRow>(`/recruiter/candidates/${id}`),
   setDecision: (id: string, decision: CandidateResult['recruiterDecision'], notes: string) =>
@@ -162,9 +182,9 @@ export const recruiterApi = {
 
   jobs: () => get<{ items: JobItem[]; total: number }>('/recruiter/jobs'),
   job: (id: string) => get<JobItem>(`/recruiter/jobs/${id}`),
-  createJob: (body: { title: string; description?: string; status?: JobStatus }) =>
+  createJob: (body: { title: string; description?: string; status?: JobStatus; totalDurationMinutes?: number; scheduledDate?: string; startTime?: string }) =>
     post<JobItem>('/recruiter/jobs', body),
-  updateJob: (id: string, body: { title?: string; description?: string; status?: JobStatus }) =>
+  updateJob: (id: string, body: { title?: string; description?: string; status?: JobStatus; totalDurationMinutes?: number; scheduledDate?: string; startTime?: string }) =>
     patch<JobItem>(`/recruiter/jobs/${id}`, body),
   deleteJob: (id: string) => del(`/recruiter/jobs/${id}`),
   jobCategories: (jobId: string) =>
@@ -212,6 +232,14 @@ export const recruiterApi = {
   createJobRole: (body: { name: string; description?: string }) =>
     post<JobRoleItem>('/recruiter/job-roles', body),
   deleteJobRole: (id: string) => del(`/recruiter/job-roles/${id}`),
+
+  questionBanks: () => get<{ items: Array<{ id: string; name: string; description: string; jobId?: string | null; jobTitle?: string | null; badgeTone?: string; createdAt?: string; isDefault?: boolean }> }>('/recruiter/question-banks'),
+  createQuestionBank: (body: { name: string; description?: string; jobId?: string | null; jobTitle?: string | null; badgeTone?: string }) =>
+    post<{ id: string; name: string; description: string; jobId?: string | null; jobTitle?: string | null; badgeTone?: string; createdAt?: string; isDefault?: boolean }>('/recruiter/question-banks', body),
+  updateQuestionBank: (id: string, body: { name?: string; description?: string; jobId?: string | null; jobTitle?: string | null; badgeTone?: string }) =>
+    put<{ id: string; name: string; description: string; jobId?: string | null; jobTitle?: string | null; badgeTone?: string; createdAt?: string; isDefault?: boolean }>(`/recruiter/question-banks/${id}`, body),
+  deleteQuestionBank: (id: string) => del(`/recruiter/question-banks/${id}`),
+
   question: (id: string) => get<Question>(`/recruiter/questions/${id}`),
   createQuestion: (body: Partial<Question> & { type: string; title: string }) =>
     post<Question>('/recruiter/questions', body),

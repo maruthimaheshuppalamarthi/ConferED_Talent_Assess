@@ -176,7 +176,11 @@ def candidate_resend(req: CandidateResendRequest, background: BackgroundTasks, d
         check_resend_cooldown(latest)
 
     challenge, code = issue_otp(db, PURPOSE_CANDIDATE_LOGIN, invite.id)
-    subject, body = email_service.candidate_resend_otp_email(invite.name, code, rt.get_int("otpExpireMinutes"))
+    assessment = db.get(Assessment, invite.assessment_id) if invite.assessment_id else None
+    assessment_title = assessment.title if assessment else ""
+    subject, body = email_service.candidate_resend_otp_email(
+        invite.name, code, rt.get_int("otpExpireMinutes"), assessment_title=assessment_title
+    )
     background.add_task(email_service.send_email, invite.email, subject, body)
     log_dev_otp(f"candidate resend {invite.email}", code)
     return challenge_out(challenge, invite.email, code)
@@ -240,6 +244,8 @@ def get_candidate_assessment(
         "roleTitle": assessment.role_title,
         "description": assessment.description,
         "totalDurationMinutes": assessment.total_duration_minutes,
+        "scheduledDate": getattr(assessment, "scheduled_date", None),
+        "startTime": getattr(assessment, "start_time", None),
         "passingPercentage": assessment.passing_percentage,
         "expiresAt": invite.expires_at.isoformat() if invite.expires_at else None,
         "sections": sections_out,
@@ -339,7 +345,28 @@ def run_code(
     allowed = {qid for ids in drawn.values() if isinstance(ids, list) for qid in ids}
     if allowed and question.id not in allowed:
         raise HTTPException(status_code=403, detail="This question is not on your paper.")
-    return code_exec.execute(body.language or question.language or "python", body.code or "", question.test_cases or [])
+
+    # Save latest running code draft & answer in DB so runs are never lost
+    prog = dict(session.progress or {})
+    code_drafts = dict(prog.get("codeDrafts") or {})
+    lang = body.language or question.language or "python"
+    prev_draft = dict(code_drafts.get(question.id) or {})
+    files = dict(prev_draft.get("files") or {})
+    files[lang] = body.code or ""
+    code_drafts[question.id] = {
+        "language": lang,
+        "files": files,
+    }
+    prog["codeDrafts"] = code_drafts
+
+    answers = dict(prog.get("answers") or {})
+    answers[question.id] = {"code": body.code or "", "language": lang}
+    prog["answers"] = answers
+    prog["updatedAt"] = utcnow().isoformat()
+    session.progress = prog
+    db.commit()
+
+    return code_exec.execute(lang, body.code or "", question.test_cases or [])
 
 
 @router.post("/submit")
@@ -354,8 +381,18 @@ def submit_assessment(
 
     sess = db.query(AssessmentSession).filter(AssessmentSession.invite_id == invite.id).first()
     drawn = (sess.drawn_question_ids if sess else None) or {}
-    if sess and not sess.completed_at:
-        sess.completed_at = utcnow()
+    if sess:
+        prog = dict(sess.progress or {})
+        submitted_answers = dict(body.answers or {})
+        # Merge submitted answers with existing answers
+        existing_answers = dict(prog.get("answers") or {})
+        existing_answers.update(submitted_answers)
+        prog["answers"] = existing_answers
+        prog["updatedAt"] = utcnow().isoformat()
+        sess.progress = prog
+        if not sess.completed_at:
+            sess.completed_at = utcnow()
+        db.commit()
 
     out = scoring.grade_submission(
         db, invite=invite, answers=body.answers or {}, drawn_question_ids=drawn,
@@ -366,6 +403,7 @@ def submit_assessment(
         "message": "Your assessment was submitted successfully. Scores are reviewed by the hiring team.",
         "resultId": out["resultId"],
     }
+
 
 
 @router.post("/feedback")

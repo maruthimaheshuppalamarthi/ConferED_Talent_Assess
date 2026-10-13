@@ -1,6 +1,7 @@
 import { ApiError } from '../services/authApi';
 import { JobItem, JobStatus, recruiterApi } from '../services/recruiterApi';
 import { Assessment, Question, QuestionCategory, Section } from '../types';
+import { questionBankStore, QuestionBankFolder } from '../services/questionBankStore';
 
 const ALL_TYPES = ['mcq', 'msq', 'drag_drop', 'coding', 'sql', 'essay'];
 const EXAM_SECTIONS = ['Quantitative Aptitude', 'Logical Reasoning', 'English', 'Technical'];
@@ -10,11 +11,12 @@ const categoryOf = (q: Question) =>
   q.type === 'essay' ? 'Theory' : (q.type === 'coding' || q.type === 'sql' ? 'Coding' : 'MCQ');
 const JOB_STATUSES: JobStatus[] = ['draft', 'open', 'closed'];
 
-/** Assessment Builder: pick a job, then edit only that job's exam sections. */
+/** Assessment Builder: pick a job, then view Question Banks and sub-sections. */
 export class AssessmentBuilderPanel {
   private container: HTMLElement;
   private jobs: JobItem[] = [];
   private openJobId = '';
+  private openBankId = '';
   private openSection = '';
   private questionsByJob: Record<string, Question[]> = {};
   private loadingJobId = '';
@@ -117,6 +119,9 @@ export class AssessmentBuilderPanel {
               <span class="text-slate-500 text-xs">${open ? '▾' : '▸'}</span>
               <span class="text-sm font-bold text-white">${esc(job.title)}</span>
               <span class="px-2 py-0.5 rounded-md text-[10px] font-bold uppercase border ${statusTone(job.status)}">${esc(job.status)}</span>
+              <span class="px-2 py-0.5 rounded-md text-[10px] font-bold bg-blue-500/10 text-blue-300 border border-blue-500/30">⏱ ${job.totalDurationMinutes || 60} min</span>
+              ${job.scheduledDate ? `<span class="px-2 py-0.5 rounded-md text-[10px] font-bold bg-purple-500/10 text-purple-300 border border-purple-500/30">📅 ${esc(job.scheduledDate)}</span>` : ''}
+              ${job.startTime ? `<span class="px-2 py-0.5 rounded-md text-[10px] font-bold bg-emerald-500/10 text-emerald-300 border border-emerald-500/30">⏰ ${esc(job.startTime)}</span>` : ''}
             </div>
             <p class="text-xs text-slate-400 mt-1 pl-5">${job.description ? esc(job.description) : 'No description yet.'}</p>
           </button>
@@ -130,33 +135,108 @@ export class AssessmentBuilderPanel {
           </div>
         </div>
         ${open ? `
-          <div class="px-4 pb-4 space-y-2">
-            ${loading ? `<p class="text-xs text-slate-500 pl-5">Loading sections…</p>` : EXAM_SECTIONS.map(name => this.sectionRow(job.id, name, questions)).join('')}
+          <div class="px-4 pb-4 space-y-4">
+            <!-- Exam Schedule & Overall Duration Setting Card -->
+            <div class="rounded-xl bg-slate-950/90 border border-slate-800 p-4 space-y-3">
+              <div class="flex items-center justify-between">
+                <div class="flex items-center gap-2">
+                  <span class="text-xs font-bold text-white uppercase tracking-wider">⏱ Exam Schedule & Overall Duration</span>
+                  <span class="text-[10px] text-slate-400 font-mono">(Applies to whole test across all sections)</span>
+                </div>
+              </div>
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label class="block text-[11px] font-semibold text-slate-300 mb-1">Overall Duration (mins)</label>
+                  <input type="number" min="5" max="360" id="job-dur-${esc(job.id)}" value="${job.totalDurationMinutes || 60}" class="glass-input w-full px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-900 text-white text-xs font-mono" />
+                  <p class="text-[10px] text-slate-500 mt-0.5">Overall time candidate gets on screen</p>
+                </div>
+                <div>
+                  <label class="block text-[11px] font-semibold text-slate-300 mb-1">Assessment Date</label>
+                  <input type="date" min="${new Date().toISOString().split('T')[0]}" id="job-date-${esc(job.id)}" value="${esc(job.scheduledDate || '')}" class="glass-input w-full px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-900 text-white text-xs" />
+                  <p class="text-[10px] text-slate-500 mt-0.5">Scheduled exam date (today or future)</p>
+                </div>
+                <div>
+                  <label class="block text-[11px] font-semibold text-slate-300 mb-1">Test Start Time</label>
+                  <input type="text" id="job-time-${esc(job.id)}" placeholder="e.g. 10:00 AM" value="${esc(job.startTime || '')}" class="glass-input w-full px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-900 text-white text-xs" />
+                  <p class="text-[10px] text-slate-500 mt-0.5">Check-in is 30 mins before this</p>
+                </div>
+              </div>
+              <div class="flex items-center justify-between pt-1">
+                <span id="job-save-feedback-${esc(job.id)}" class="text-[11px] text-emerald-400 font-semibold"></span>
+                <button data-job-save-schedule="${esc(job.id)}" class="px-4 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow transition-all">
+                  Save Schedule & Time
+                </button>
+              </div>
+            </div>
+
+            ${loading ? `<p class="text-xs text-slate-500 pl-5">Loading question banks…</p>` : this.jobBanksView(job, questions)}
           </div>
         ` : ''}
       </div>`;
   }
 
-  private sectionRow(jobId: string, name: string, questions: Question[]): string {
-    const inSection = questions.filter(q => (q.sectionCategory || '') === name);
-    const open = jobId === this.openJobId && this.openSection === name;
+  private jobBanksView(job: JobItem, questions: Question[]): string {
+    const banks = questionBankStore.getBanksForJob(job.id, questions);
+    if (!banks.length) {
+      return `<p class="text-xs text-slate-500 pl-5">No Question Banks assigned to this job yet.</p>`;
+    }
     return `
-      <div class="rounded-xl border border-slate-800 bg-slate-950/60">
-        <button data-section-toggle="${esc(name)}" class="w-full flex items-center justify-between gap-3 px-4 py-3 text-left">
-          <span class="text-sm font-semibold text-white"><span class="text-slate-500 mr-2">${open ? '▾' : '▸'}</span>${esc(name)}</span>
-          <span class="text-xs font-mono text-slate-400"><b class="text-purple-400">${inSection.length}</b> questions</span>
+      <div class="space-y-2.5 pl-2">
+        <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider pl-1">
+          📁 Assigned Question Banks (${banks.length})
+        </p>
+        ${banks.map(bank => this.bankRow(job.id, bank, questions)).join('')}
+      </div>
+    `;
+  }
+
+  private bankRow(jobId: string, bank: QuestionBankFolder, allQuestions: Question[]): string {
+    const bankQuestions = allQuestions.filter(q => questionBankStore.getBankIdForQuestion(q) === bank.id);
+    const open = jobId === this.openJobId && this.openBankId === bank.id;
+    return `
+      <div class="rounded-xl border ${open ? 'border-blue-500/50 bg-slate-950/80 shadow-md' : 'border-slate-800 bg-slate-950/40'} transition-all">
+        <button data-bank-toggle="${esc(bank.id)}" class="w-full flex items-center justify-between gap-3 px-4 py-3 text-left hover:bg-slate-800/30 rounded-xl transition-colors">
+          <div class="flex items-center gap-2.5 min-w-0">
+            <span class="text-slate-500 text-xs">${open ? '▾' : '▸'}</span>
+            <span class="text-base">📁</span>
+            <span class="text-sm font-bold text-white truncate">${esc(bank.name)}</span>
+            <span class="text-[11px] text-slate-400 hidden sm:inline">• ${esc(bank.description)}</span>
+          </div>
+          <span class="text-xs font-mono text-slate-400 shrink-0">
+            <b class="text-blue-400">${bankQuestions.length}</b> questions
+          </span>
         </button>
         ${open ? `
-          <div class="px-4 pb-4 space-y-3">
+          <div class="px-4 pb-4 pt-1 space-y-2 border-t border-slate-800/60 mt-1">
+            <div class="text-[11px] text-slate-400 font-semibold mb-2 pl-2">
+              Sub-sections inside ${esc(bank.name)}:
+            </div>
+            ${EXAM_SECTIONS.map(name => this.sectionRow(jobId, bank.id, name, bankQuestions)).join('')}
+          </div>
+        ` : ''}
+      </div>`;
+  }
+
+  private sectionRow(jobId: string, bankId: string, name: string, questions: Question[]): string {
+    const inSection = questions.filter(q => (q.sectionCategory || '') === name);
+    const open = jobId === this.openJobId && this.openBankId === bankId && this.openSection === name;
+    return `
+      <div class="rounded-xl border border-slate-800 bg-slate-900/60">
+        <button data-section-toggle="${esc(name)}" class="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-left hover:bg-slate-800/20 rounded-xl">
+          <span class="text-xs font-semibold text-white"><span class="text-slate-500 mr-2">${open ? '▾' : '▸'}</span>${esc(name)}</span>
+          <span class="text-[11px] font-mono text-slate-400"><b class="text-purple-400">${inSection.length}</b> questions</span>
+        </button>
+        ${open ? `
+          <div class="px-4 pb-3 pt-1 space-y-2.5 border-t border-slate-800/40">
             ${inSection.length ? EXAM_CATEGORIES.map(cat => {
               const items = inSection.filter(q => categoryOf(q) === cat);
               if (!items.length) return '';
               return `
-                <div class="space-y-1.5 pl-5">
-                  <p class="text-[11px] font-bold text-indigo-300">${esc(cat)}</p>
+                <div class="space-y-1.5 pl-4">
+                  <p class="text-[10px] font-bold uppercase tracking-wider text-indigo-300">${esc(cat)}</p>
                   ${items.map(q => questionLine(q)).join('')}
                 </div>`;
-            }).join('') : `<p class="text-[11px] text-slate-500 pl-5">No questions in this section yet. Assign them from the Question Bank.</p>`}
+            }).join('') : `<p class="text-[11px] text-slate-500 pl-4 py-1">No questions in this sub-section yet. Add them in Question Bank.</p>`}
           </div>
         ` : ''}
       </div>`;
@@ -168,6 +248,14 @@ export class AssessmentBuilderPanel {
       btn.addEventListener('click', e => {
         const id = (e.currentTarget as HTMLElement).getAttribute('data-job-toggle') || '';
         if (id) void this.toggleJob(id);
+      });
+    });
+    this.container.querySelectorAll('[data-bank-toggle]').forEach(btn => {
+      btn.addEventListener('click', e => {
+        const id = (e.currentTarget as HTMLElement).getAttribute('data-bank-toggle') || '';
+        this.openBankId = this.openBankId === id ? '' : id;
+        this.openSection = '';
+        this.paint();
       });
     });
     this.container.querySelectorAll('[data-section-toggle]').forEach(btn => {
@@ -217,6 +305,37 @@ export class AssessmentBuilderPanel {
         if (sec) this.renderSectionModal(sec);
       });
     });
+    this.container.querySelectorAll('[data-job-save-schedule]').forEach(btn => {
+      btn.addEventListener('click', async e => {
+        const id = (e.currentTarget as HTMLElement).getAttribute('data-job-save-schedule') || '';
+        const durInput = this.container.querySelector(`#job-dur-${id}`) as HTMLInputElement | null;
+        const dateInput = this.container.querySelector(`#job-date-${id}`) as HTMLInputElement | null;
+        const timeInput = this.container.querySelector(`#job-time-${id}`) as HTMLInputElement | null;
+        const feedback = this.container.querySelector(`#job-save-feedback-${id}`) as HTMLElement | null;
+        const totalDurationMinutes = durInput ? parseInt(durInput.value, 10) || 60 : 60;
+        const scheduledDate = dateInput ? dateInput.value.trim() : '';
+        const startTime = timeInput ? timeInput.value.trim() : '';
+
+        const todayStr = new Date().toISOString().split('T')[0];
+        if (scheduledDate && scheduledDate < todayStr) {
+          alert('Assessment date cannot be in the past. Please select today or a future date.');
+          return;
+        }
+
+        try {
+          const updated = await recruiterApi.updateJob(id, { totalDurationMinutes, scheduledDate, startTime });
+          const idx = this.jobs.findIndex(j => j.id === id);
+          if (idx >= 0) this.jobs[idx] = updated;
+          if (feedback) {
+            feedback.textContent = '✓ Saved to database!';
+            setTimeout(() => { if (feedback) feedback.textContent = ''; }, 3000);
+          }
+          this.paint();
+        } catch (err) {
+          alert(err instanceof ApiError ? err.message : 'Could not save schedule.');
+        }
+      });
+    });
     this.container.querySelectorAll('[data-sec-del]').forEach(btn => {
       btn.addEventListener('click', e => {
         const secId = (e.currentTarget as HTMLElement).getAttribute('data-sec-del');
@@ -228,11 +347,13 @@ export class AssessmentBuilderPanel {
   private async toggleJob(id: string) {
     if (this.openJobId === id) {
       this.openJobId = '';
+      this.openBankId = '';
       this.openSection = '';
       this.paint();
       return;
     }
     this.openJobId = id;
+    this.openBankId = '';
     this.openSection = '';
     this.activeJobId = id;
     this.loadingJobId = id;
@@ -318,6 +439,23 @@ export class AssessmentBuilderPanel {
                 ${JOB_STATUSES.map(s => `<option value="${s}" ${(job?.status || 'draft') === s ? 'selected' : ''}>${s}</option>`).join('')}
               </select>
             </div>
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-1">
+              <div>
+                <label class="block font-semibold text-slate-300 mb-1">Overall Duration</label>
+                <input type="number" min="5" max="360" id="job-modal-dur" class="glass-input w-full px-3 py-2 rounded-xl border border-slate-700 bg-slate-950 text-white font-mono text-xs" value="${job?.totalDurationMinutes || 60}" />
+                <span class="text-[10px] text-slate-500">Mins (all sections)</span>
+              </div>
+              <div>
+                <label class="block font-semibold text-slate-300 mb-1">Assessment Date</label>
+                <input type="date" min="${new Date().toISOString().split('T')[0]}" id="job-modal-date" class="glass-input w-full px-3 py-2 rounded-xl border border-slate-700 bg-slate-950 text-white text-xs" value="${esc(job?.scheduledDate || '')}" />
+                <span class="text-[10px] text-slate-500">Exam date (today/future)</span>
+              </div>
+              <div>
+                <label class="block font-semibold text-slate-300 mb-1">Start Time</label>
+                <input type="text" id="job-modal-time" placeholder="e.g. 10:00 AM" class="glass-input w-full px-3 py-2 rounded-xl border border-slate-700 bg-slate-950 text-white text-xs" value="${esc(job?.startTime || '')}" />
+                <span class="text-[10px] text-slate-500">Exam start</span>
+              </div>
+            </div>
             <div class="flex justify-end gap-3 pt-2">
               <button type="button" id="close-job-modal-2" class="px-4 py-2 rounded-xl bg-slate-800 text-slate-300 font-bold">Cancel</button>
               <button type="submit" class="px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold">${isEdit ? 'Save' : 'Create'}</button>
@@ -338,11 +476,22 @@ export class AssessmentBuilderPanel {
     const title = (host.querySelector('#job-title') as HTMLInputElement).value.trim();
     const description = (host.querySelector('#job-desc') as HTMLTextAreaElement).value.trim();
     const status = (host.querySelector('#job-modal-status') as HTMLSelectElement).value as JobStatus;
+    const durInput = host.querySelector('#job-modal-dur') as HTMLInputElement | null;
+    const dateInput = host.querySelector('#job-modal-date') as HTMLInputElement | null;
+    const timeInput = host.querySelector('#job-modal-time') as HTMLInputElement | null;
+    const totalDurationMinutes = durInput ? parseInt(durInput.value, 10) || 60 : 60;
+    const scheduledDate = dateInput ? dateInput.value.trim() : '';
+    const startTime = timeInput ? timeInput.value.trim() : '';
     if (!title) return alert('Enter a job title.');
+    const todayStr = new Date().toISOString().split('T')[0];
+    if (scheduledDate && scheduledDate < todayStr) {
+      return alert('Assessment date cannot be in the past. Please select today or a future date.');
+    }
     try {
+      const payload = { title, description, status, totalDurationMinutes, scheduledDate, startTime };
       const saved = job
-        ? await recruiterApi.updateJob(job.id, { title, description, status })
-        : await recruiterApi.createJob({ title, description, status });
+        ? await recruiterApi.updateJob(job.id, payload)
+        : await recruiterApi.createJob(payload);
       this.activeJobId = saved.id;
       close();
       await this.load();

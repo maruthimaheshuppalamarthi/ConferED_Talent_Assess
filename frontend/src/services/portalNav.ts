@@ -25,7 +25,8 @@ export const PORTAL_NAV: Record<Portal, NavItem[]> = {
     { tab: 'audit', icon: '📜', label: 'Audit Logs', slug: 'audit-logs' },
   ],
   recruiter: [
-    { tab: 'pipeline', icon: '📋', label: 'Hiring Pipeline', slug: 'hiringpipeline' },
+    { tab: 'pipeline', icon: '📊', label: 'Hiring Overview', slug: 'hiring-overview' },
+    { tab: 'candidate-evaluations', icon: '🎯', label: 'Candidate Assessments', slug: 'candidate-assessments' },
     { tab: 'assessment-builder', icon: '🛠️', label: 'Assessment Builder', slug: 'assessment-builder' },
     { tab: 'question-bank', icon: '🗂️', label: 'Question Bank', slug: 'question-bank' },
   ],
@@ -55,8 +56,12 @@ export const setPortalTab = (portal: Portal, tab: string): void => {
 
 /** Open the section that matches the URL (`staff-management` → staff). Unknown slugs fall back to the default. */
 export const applyPathTab = (portal: Portal, sectionSlug: string): void => {
-  // Candidate detail lives under the hiring pipeline (`/recruiter/candidates/:id`).
+  // Candidate detail lives under candidate evaluations (`/recruiter/candidates/:id`).
   if (portal === 'recruiter' && sectionSlug.startsWith('candidates/')) {
+    current[portal] = 'candidate-evaluations';
+    return;
+  }
+  if (portal === 'recruiter' && (sectionSlug === 'hiringpipeline' || sectionSlug === 'pipeline' || sectionSlug === 'hiring-overview' || !sectionSlug)) {
     current[portal] = 'pipeline';
     return;
   }

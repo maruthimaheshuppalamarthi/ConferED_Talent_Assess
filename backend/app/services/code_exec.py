@@ -62,14 +62,38 @@ def _prepare(language: str, code: str, workdir: str) -> _Program:
     """Write source and return the command that executes it. Raises ValueError if it cannot be built."""
     lang = (language or "").strip().lower()
 
-    def write(name: str) -> str:
+    def write(name: str, content: str = "") -> str:
         path = os.path.join(workdir, name)
         with open(path, "w", encoding="utf-8", newline="\n") as handle:
-            handle.write(code)
+            handle.write(content if content else code)
         return path
 
     if lang == "python":
-        return _Program([sys.executable, "-I"], write("main.py"))
+        py_code = code
+        if "sys.stdin" not in code and "input(" not in code:
+            import re
+            funcs = re.findall(r"^def\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(", code, flags=re.MULTILINE)
+            if funcs:
+                main_func = funcs[-1]
+                harness = (
+                    f"\n\nif __name__ == '__main__':\n"
+                    f"    import sys, ast\n"
+                    f"    _raw = sys.stdin.read().strip()\n"
+                    f"    if _raw:\n"
+                    f"        try:\n"
+                    f"            _parsed = ast.literal_eval(_raw)\n"
+                    f"            if isinstance(_parsed, tuple):\n"
+                    f"                print({main_func}(*_parsed))\n"
+                    f"            else:\n"
+                    f"                print({main_func}(_parsed))\n"
+                    f"        except Exception:\n"
+                    f"            try:\n"
+                    f"                print({main_func}(_raw))\n"
+                    f"            except Exception:\n"
+                    f"                pass\n"
+                )
+                py_code = code + harness
+        return _Program([sys.executable, "-I"], write("main.py", py_code))
 
     if lang == "javascript":
         node = _which("node")
@@ -171,6 +195,11 @@ def _prepare(language: str, code: str, workdir: str) -> _Program:
 
 def execute(language: str, code: str, test_cases: List[dict]) -> Dict[str, Any]:
     started = time.perf_counter()
+    lang = (language or "").strip().lower()
+    if lang == "sql":
+        from app.services.sql_exec import execute_sql
+        return execute_sql(code, test_cases)
+
     code = code or ""
     if len(code) > _MAX_CODE:
         return _failed(language, "The program is too large to run.", [], started)

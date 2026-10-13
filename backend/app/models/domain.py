@@ -1,3 +1,9 @@
+"""
+NOTE: Deprecated legacy schema file.
+The active production database schema is managed in `app.models.auth` (AuthBase)
+with complete support for timezone-aware UTC timestamps, JSONB, migrations, and RBAC.
+This file is kept only for backwards compatibility with any legacy imports.
+"""
 import datetime
 from sqlalchemy import Column, String, Integer, Float, Boolean, ForeignKey, Text, JSON, DateTime, Enum
 from sqlalchemy.orm import declarative_base, relationship
@@ -33,6 +39,8 @@ class Assessment(Base):
     role_title = Column(String, nullable=False)
     description = Column(Text)
     total_duration_minutes = Column(Integer, default=60)
+    scheduled_date = Column(String, nullable=True)
+    start_time = Column(String, nullable=True)
     passing_percentage = Column(Float, default=70.0)
     status = Column(String, default="active")
     created_at = Column(DateTime, default=datetime.datetime.utcnow)

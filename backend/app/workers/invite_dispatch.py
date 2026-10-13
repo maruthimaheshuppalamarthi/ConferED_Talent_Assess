@@ -30,6 +30,8 @@ def dispatch_invite_email(row_id: str, invite_token: str, otp_code: str = "") ->
         assessment = db.query(Assessment).filter(Assessment.id == (invite.assessment_id if invite else "")).first()
         title = assessment.title if assessment else "Assessment"
         duration = assessment.total_duration_minutes if assessment else 60
+        sched_date = getattr(assessment, "scheduled_date", None) or ""
+        sched_time = getattr(assessment, "start_time", None) or ""
         aid = assessment.id if assessment else ""
         link = (
             f"{settings.FRONTEND_URL.rstrip('/')}/assessment/take?assessment={aid}&invite={invite_token}"
@@ -52,6 +54,8 @@ def dispatch_invite_email(row_id: str, invite_token: str, otp_code: str = "") ->
             assessment_title=title,
             duration_minutes=duration,
             deadline_label=deadline,
+            scheduled_date=sched_date,
+            start_time=sched_time,
         )
         ok = email_service.send_email(row.email, subject, body)
         if ok:

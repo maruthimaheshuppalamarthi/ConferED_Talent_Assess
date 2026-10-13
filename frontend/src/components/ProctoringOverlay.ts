@@ -32,6 +32,10 @@ class ProctoringOverlay {
   private blurBound = false;
   private shotAt = 0;
   private video: HTMLVideoElement | null = null;
+  private audioCtx: AudioContext | null = null;
+  private analyser: AnalyserNode | null = null;
+  private audioData: Uint8Array | null = null;
+  private loudMs = 0;
 
   mount() {
     if (this.root) return;
@@ -55,6 +59,13 @@ class ProctoringOverlay {
     this.stream = null;
     this.ownStream = false;
     this.video = null;
+    if (this.audioCtx && this.audioCtx.state !== 'closed') {
+      this.audioCtx.close().catch(() => undefined);
+      this.audioCtx = null;
+    }
+    this.analyser = null;
+    this.audioData = null;
+    this.loudMs = 0;
     this.root?.remove();
     this.root = null;
     this.missingMs = 0;
@@ -201,6 +212,22 @@ class ProctoringOverlay {
       this.stream = existing || await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: true });
       this.ownStream = !existing;
       if (this.stream) store.registerMediaStream(this.stream);
+      if (this.stream && this.stream.getAudioTracks().length > 0) {
+        try {
+          const AudioContextClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+          if (AudioContextClass) {
+            this.audioCtx = new AudioContextClass();
+            const source = this.audioCtx.createMediaStreamSource(this.stream);
+            this.analyser = this.audioCtx.createAnalyser();
+            this.analyser.fftSize = 512;
+            this.analyser.smoothingTimeConstant = 0.4;
+            source.connect(this.analyser);
+            this.audioData = new Uint8Array(this.analyser.frequencyBinCount);
+          }
+        } catch {
+          // Web Audio not permitted or supported
+        }
+      }
       if (video && this.stream) {
         this.video = video;
         video.srcObject = this.stream;
@@ -248,6 +275,25 @@ class ProctoringOverlay {
 
     const examLive = state.examStarted && !state.examCompleted;
     if (!examLive) return;
+
+    // Audio volume & background voice detection
+    if (state.settings.requireMicrophone && this.analyser && this.audioData) {
+      this.analyser.getByteFrequencyData(this.audioData as any);
+      let sum = 0;
+      for (let i = 0; i < this.audioData.length; i++) {
+        sum += this.audioData[i];
+      }
+      const avg = sum / this.audioData.length;
+      if (avg > 48) {
+        this.loudMs += dt;
+        if (this.loudMs >= 1600) {
+          this.warn('Background Voice', 'Excessive speaking or background audio detected.', 'medium');
+          this.loudMs = 0;
+        }
+      } else {
+        this.loudMs = Math.max(0, this.loudMs - dt * 2);
+      }
+    }
 
     if (!inFrame) {
       this.missingMs += dt;

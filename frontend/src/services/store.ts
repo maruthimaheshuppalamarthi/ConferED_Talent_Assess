@@ -414,8 +414,13 @@ class Store {
   }
 
   private armSectionClock(minutes: number, force: boolean) {
-    const seconds = Math.max(1, Math.round((minutes || 15) * 60));
-    if (!force && this.state.sectionEndsAtMs && this.state.sectionEndsAtMs > Date.now()) {
+    const assessment = this.getActiveAssessment();
+    const overallMinutes = (assessment?.totalDurationMinutes && assessment.totalDurationMinutes > 0)
+      ? assessment.totalDurationMinutes
+      : (minutes || 60);
+    const seconds = Math.max(1, Math.round(overallMinutes * 60));
+    // If the overall exam clock is already running, keep ticking without reset
+    if (this.state.sectionEndsAtMs && this.state.sectionEndsAtMs > Date.now()) {
       this.state.sectionTimeRemainingSeconds = this.getSectionRemainingSeconds();
       return;
     }
@@ -429,12 +434,12 @@ class Store {
     const sections = assessment?.sections || [];
     const idx = sections.findIndex(sec => (sec.questions || []).length > 0);
     const nextIndex = idx >= 0 ? idx : 0;
-    const sectionChanged = nextIndex !== this.state.currentSectionIndex;
     this.state.currentSectionIndex = nextIndex;
     this.state.currentQuestionIndex = 0;
     const currentSection = sections[this.state.currentSectionIndex];
     if (currentSection) {
-      this.armSectionClock(currentSection.timeLimitMinutes || 15, resetClock || sectionChanged);
+      const overallMinutes = assessment?.totalDurationMinutes || currentSection.timeLimitMinutes || 60;
+      this.armSectionClock(overallMinutes, resetClock);
     }
   }
 
@@ -522,7 +527,8 @@ class Store {
     if (next < sections.length) {
       this.state.currentSectionIndex = next;
       this.state.currentQuestionIndex = 0;
-      this.armSectionClock(sections[next].timeLimitMinutes || 15, true);
+      this.armSectionClock(sections[next].timeLimitMinutes || 15, false);
+      this.persistExam();
       this.notify();
     } else {
       this.submitAssessment();
