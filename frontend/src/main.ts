@@ -86,16 +86,15 @@ class App {
     const state = store.getState();
     const route = currentRoute();
     const examLive = state.examStarted && !state.examCompleted;
-    const publicLanding = route.kind === 'candidate' && !state.otpVerified && !examLive;
-    const showFooter = publicLanding || (route.kind === 'staff' && !state.isStaffAuthenticated);
+    const isStaffSignedIn = route.kind === 'staff' && state.isStaffAuthenticated && !!state.currentUser;
+    const showFooter = !examLive;
     const shell = document.getElementById('app-shell');
     if (shell) {
-      shell.className = publicLanding
-        ? 'min-h-screen flex flex-col bg-white text-[#1f2937]'
-        : 'min-h-screen flex flex-col bg-slate-950 text-slate-100';
+      shell.className = 'min-h-screen flex flex-col bg-slate-950 text-slate-100';
     }
     if (showFooter) {
-      new FooterComponent(this.footerHost).render();
+      const footerMode = isStaffSignedIn ? 'small' : 'full';
+      new FooterComponent(this.footerHost, footerMode).render();
     } else {
       this.footerHost.innerHTML = '';
     }
@@ -152,10 +151,10 @@ class App {
     // Signed-in layout: one scrolling sidebar on the left, the portal page on the right.
     const navHeight = this.navbarHost.offsetHeight;
     this.contentHost.innerHTML = `
-      <div class="flex flex-col md:flex-row md:items-start">
+      <div class="flex flex-col md:flex-row md:items-start flex-1 min-h-[calc(100vh-110px)]">
         <aside id="sidebar-host"
           class="glass-panel w-full md:w-64 md:shrink-0 rounded-none border-0 border-b md:border-b-0 md:border-r border-slate-800 p-3 md:sticky md:overflow-y-auto"
-          style="${navHeight ? `top:${navHeight}px;height:calc(100vh - ${navHeight}px)` : ''}"></aside>
+          style="${navHeight ? `top:${navHeight}px;height:calc(100vh - ${navHeight}px - 44px)` : ''}"></aside>
         <div id="portal-host" class="flex-1 min-w-0"></div>
       </div>
     `;

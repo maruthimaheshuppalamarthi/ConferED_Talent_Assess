@@ -107,14 +107,22 @@ export class LiveMonitorPortalModule {
     if (getPortalTab('proctor') === 'identity-verification') return;
     this.container.innerHTML = `
       <div class="max-w-7xl mx-auto py-8 px-4 lg:px-8 space-y-6">
-        <div class="flex items-center justify-between glass-panel p-6 rounded-3xl border border-slate-800">
-          <div>
-            <h1 class="text-xl font-extrabold text-white">Live monitoring</h1>
-            <p class="text-xs text-slate-400 mt-1">Admitted candidates. Select one to hear their microphone.</p>
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 glass-panel p-6 rounded-3xl border border-slate-800">
+          <div class="space-y-1">
+            <div class="flex items-center gap-2">
+              <span class="px-2.5 py-0.5 rounded-full text-[10px] font-bold font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center gap-1.5">
+                <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span> Proctor Surveillance Engine
+              </span>
+            </div>
+            <h1 class="text-2xl font-extrabold text-white tracking-tight">Live Candidate Monitor</h1>
+            <p class="text-xs text-slate-400">Real-time candidate camera feeds and AI integrity tracking. Select any card to monitor audio or speak directly.</p>
           </div>
-          <span class="px-3 py-1 bg-slate-900 border border-slate-800 rounded-full text-xs font-mono text-slate-300">
-            Active: <b class="text-blue-400">${this.items.length}</b>
-          </span>
+          <div class="flex items-center gap-2 shrink-0">
+            <span class="px-3.5 py-1.5 bg-slate-900 border border-slate-800 rounded-full text-xs font-mono text-slate-300 flex items-center gap-2">
+              <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+              Live Feeds: <b class="text-emerald-400 font-bold">${this.items.length}</b>
+            </span>
+          </div>
         </div>
         ${error ? `<p class="text-xs text-red-400">${escapeHtml(error)}</p>` : ''}
         ${this.items.length === 0 ? `<p class="text-sm text-slate-500">No admitted candidates yet. Admit someone from Identity & ID Verification.</p>` : ''}

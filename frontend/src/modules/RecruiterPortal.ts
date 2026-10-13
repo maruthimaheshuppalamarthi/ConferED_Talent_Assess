@@ -109,21 +109,26 @@ export class RecruiterPortalModule {
     this.container.innerHTML = `
       <div class="max-w-7xl mx-auto py-8 px-4 lg:px-8 space-y-6">
         <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 glass-panel p-6 rounded-3xl border border-slate-800">
-          <div>
+          <div class="space-y-1">
+            <div class="flex items-center gap-2">
+              <span class="px-2.5 py-0.5 rounded-full text-[10px] font-bold font-mono bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
+                💼 Talent Operations
+              </span>
+            </div>
             <h1 class="text-2xl font-extrabold text-white tracking-tight">Hiring Pipeline</h1>
-            <p class="text-xs text-slate-400 mt-1">Track candidates from invite through review and decision.</p>
+            <p class="text-xs text-slate-400">Track candidates from invite through automated code evaluation and final decision.</p>
           </div>
           <div class="flex flex-wrap items-center gap-2">
             <div class="inline-flex bg-slate-900 p-1 rounded-xl border border-slate-800">
-              <button id="view-table-btn" title="Table layout" class="px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${this.currentViewMode === 'table' ? 'bg-blue-600 text-white shadow' : 'text-slate-400 hover:text-white'}">Table</button>
-              <button id="view-kanban-btn" title="Board layout by stage" class="px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${this.currentViewMode === 'kanban' ? 'bg-blue-600 text-white shadow' : 'text-slate-400 hover:text-white'}">Board</button>
+              <button id="view-table-btn" title="Table layout" class="px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${this.currentViewMode === 'table' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'}">Table</button>
+              <button id="view-kanban-btn" title="Board layout by stage" class="px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${this.currentViewMode === 'kanban' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'}">Board</button>
             </div>
             ${this.currentViewMode === 'table' ? `
               <button id="export-all-csv-btn" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 font-semibold text-xs">Export</button>
             ` : ''}
             <button id="view-sent-emails-btn" class="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 font-semibold text-xs">Sent invites</button>
             <button id="bulk-invite-btn" class="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 font-semibold text-xs">Bulk invite</button>
-            <button id="invite-cand-btn" class="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs shadow-md shadow-blue-600/20">Invite candidate</button>
+            <button id="invite-cand-btn" class="px-4 py-2 rounded-xl bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-bold text-xs shadow-md shadow-indigo-600/30">Invite candidate</button>
           </div>
         </div>
 
@@ -135,7 +140,7 @@ export class RecruiterPortalModule {
             return `
               <button data-stage-tab="${stg}" class="stage-tab-btn px-3.5 py-2 rounded-xl text-xs font-semibold transition-all flex items-center gap-2 whitespace-nowrap border ${
                 isActive
-                  ? 'bg-blue-600 text-white border-blue-500 shadow-sm'
+                  ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white border-indigo-500 shadow-sm'
                   : 'bg-transparent text-slate-400 hover:text-white border-transparent hover:bg-slate-900'
               }">
                 <span>${STAGE_LABEL[stg]}</span>
