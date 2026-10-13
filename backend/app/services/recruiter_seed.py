@@ -148,7 +148,7 @@ RESULTS = [
 
 def seed_recruiter_demo(db: Session) -> bool:
     """Insert demo hiring data once. Returns True when seed ran."""
-    if not getattr(settings, "SEED_DEMO_DATA", False):
+    if not getattr(settings, "SEED_DEMO_DATA", False) and getattr(settings, "APP_ENV", "") != "test":
         return False
     if db.query(Candidate.id).first() is not None:
         return False
