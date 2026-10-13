@@ -25,10 +25,11 @@ Invites / email:
     POST /recruiter/candidates/invites
     POST /recruiter/send-email
 """
+import threading
 from datetime import timedelta
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -38,7 +39,7 @@ from app.core.config import settings
 from app.core.roles import PORTAL_RECRUITER
 from app.core.security import generate_opaque_token, hash_opaque_token
 from app.db.session import get_db
-from app.models.auth import Assessment, CandidateInvite, StaffUser, utcnow
+from app.models.auth import Assessment, CandidateInvite, OtpChallenge, StaffUser, utcnow
 from app.services import audit
 from app.services import email as email_service
 from app.services import question_bank
@@ -532,15 +533,41 @@ def delete_question(question_id: str, request: Request,
     return None
 
 
+# invite id -> safe SMTP result, filled by the send thread after the response has returned
+_INVITE_DELIVERY: Dict[str, str] = {}
+
+
 # ------------------------------------------------------------------ invites / email
 @router.post("/candidates/invites", response_model=InviteOut, status_code=201)
-def create_invite(req: InviteCreateRequest, background: BackgroundTasks, request: Request,
+def create_invite(req: InviteCreateRequest, request: Request,
                   actor: StaffUser = Depends(require_portal(PORTAL_RECRUITER)), db: Session = Depends(get_db)):
     try:
         pipeline.ensure_job_is_open(db, req.assessmentId)
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
     email = norm_email(req.email)
+    # A new invite replaces any earlier unused link for this person and assessment,
+    # so the email they receive is the only link and passcode that still work.
+    previous = (
+        db.query(CandidateInvite)
+        .filter(
+            CandidateInvite.email == email,
+            CandidateInvite.assessment_id == req.assessmentId,
+            CandidateInvite.revoked.is_(False),
+            CandidateInvite.delivery_status != "COMPLETED",
+        )
+        .all()
+    )
+    if previous:
+        for old in previous:
+            old.revoked = True
+        db.query(OtpChallenge).filter(
+            OtpChallenge.purpose == PURPOSE_CANDIDATE_LOGIN,
+            OtpChallenge.subject_id.in_([old.id for old in previous]),
+            OtpChallenge.consumed.is_(False),
+        ).update({"consumed": True}, synchronize_session=False)
+        db.commit()
+
     token = generate_opaque_token()
     candidate_id = req.candidateId or f"cand-{int(utcnow().timestamp() * 1000)}"
     expires_in_hours = req.expiresInHours or rt.get_int("linkExpirationHours")
@@ -573,21 +600,29 @@ def create_invite(req: InviteCreateRequest, background: BackgroundTasks, request
     subject, body = email_service.candidate_invite_email(
         invite.name, link, code, rt.get_int("otpExpireMinutes"), f"in {expires_in_hours} hours",
         assessment_title=title, duration_minutes=duration, deadline_label=deadline_label,
+        to_email=email,
     )
+    if previous:
+        subject = f"New invitation: {title}"
+
+    invite_id = invite.id
 
     def _send_and_mark():
-        ok = email_service.send_email(email, subject, body)
+        # A daemon thread so Gmail's handshake cannot hold the request worker.
+        # To is the address typed on the invite form, and nobody else.
+        ok, message = email_service.send_email_detailed(email, subject, body)
+        _INVITE_DELIVERY[invite_id] = message
         from app.db.session import SessionLocal
         s = SessionLocal()
         try:
-            inv = s.query(CandidateInvite).filter(CandidateInvite.id == invite.id).first()
-            if inv:
+            inv = s.query(CandidateInvite).filter(CandidateInvite.id == invite_id).first()
+            if inv and inv.delivery_status == "PENDING":
                 inv.delivery_status = "SENT" if ok else "FAILED"
                 s.commit()
         finally:
             s.close()
 
-    background.add_task(_send_and_mark)
+    threading.Thread(target=_send_and_mark, daemon=True, name="invite-smtp").start()
     log_dev_otp(f"candidate invite {email}", code)
     audit.record_audit(
         db, category=audit.CAT_CANDIDATE, action="candidate.invite_create", actor=actor, request=request,
@@ -606,6 +641,19 @@ def create_invite(req: InviteCreateRequest, background: BackgroundTasks, request
         durationMinutes=duration,
         devOtp=code if settings.DEV_EXPOSE_OTP else None,
     )
+
+
+@router.get("/candidates/invites/{invite_id}/delivery")
+def invite_delivery(invite_id: str,
+                    _actor: StaffUser = Depends(require_portal(PORTAL_RECRUITER)),
+                    db: Session = Depends(get_db)):
+    invite = db.query(CandidateInvite).filter(CandidateInvite.id == invite_id).first()
+    if not invite:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Invitation not found")
+    return {
+        "deliveryStatus": invite.delivery_status,
+        "message": _INVITE_DELIVERY.get(invite_id, ""),
+    }
 
 
 @router.post("/send-email")

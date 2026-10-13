@@ -1,5 +1,5 @@
 import { BRAND } from '../brand';
-import { MonacoEditorComponent } from '../components/MonacoEditorComponent';
+import { flushCodingEditor, MonacoEditorComponent } from '../components/MonacoEditorComponent';
 import { ensureProctoringOverlay, teardownProctoringOverlay } from '../components/ProctoringOverlay';
 import { SystemCheckComponent } from '../components/SystemCheck';
 import { PORTAL_INFO, router } from '../router';
@@ -73,6 +73,7 @@ export class CandidatePortalModule {
       if (!document.fullscreenElement) {
         blocker.classList.remove('hidden');
         if (CandidatePortalModule.wasFullscreen) {
+          flushCodingEditor();
           store.logProctoringViolation('Fullscreen Exit', 'Candidate left fullscreen lockdown', 'high');
           const next = store.getState();
           const used = next.violationCount;
@@ -476,6 +477,7 @@ export class CandidatePortalModule {
               <div class="prose prose-invert prose-sm text-slate-300 mt-3 space-y-2 whitespace-pre-line leading-relaxed">
                 ${currentQuestion.content}
               </div>
+              ${codingNotes(currentQuestion)}
             </div>
 
             <!-- Answer Input Widget based on Question Type -->
@@ -681,18 +683,22 @@ export class CandidatePortalModule {
     this.container.querySelectorAll('.q-map-btn').forEach(btn => {
       btn.addEventListener('click', (e) => {
         const qidx = parseInt((e.currentTarget as HTMLElement).getAttribute('data-qidx') || '0', 10);
+        flushCodingEditor();
         const state = store.getState();
         state.currentQuestionIndex = qidx;
+        store.flushExamProgress();
         this.renderExamEngine();
       });
     });
 
     this.container.querySelector('#prev-q-btn')?.addEventListener('click', () => {
+      flushCodingEditor();
       store.prevQuestion();
       this.renderExamEngine();
     });
 
     this.container.querySelector('#next-q-btn')?.addEventListener('click', () => {
+      flushCodingEditor();
       store.nextQuestion();
       this.renderExamEngine();
     });
@@ -741,6 +747,7 @@ export class CandidatePortalModule {
 
     modalHost.querySelector('#confirm-sec-modal-btn')?.addEventListener('click', () => {
       modalHost.remove();
+      flushCodingEditor();
       store.nextSection();
       // Re-affirm Fullscreen mode without triggering browser native exit
       if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
@@ -774,6 +781,7 @@ export class CandidatePortalModule {
         timerEl.classList.toggle('text-blue-400', remaining >= 120);
       }
       if (remaining <= 0) {
+        flushCodingEditor();
         store.nextSection();
       }
     }, 250);
@@ -868,14 +876,8 @@ export class CandidatePortalModule {
   }
 
   private attachFeedbackEvents() {
-    // Exit Fullscreen & Close Tab button listener
-    const exitBtn = this.container.querySelector('#exit-fullscreen-close-tab-btn');
-    exitBtn?.addEventListener('click', () => {
-      if (document.fullscreenElement && document.exitFullscreen) {
-        document.exitFullscreen().catch(() => {});
-      }
-      alert('✅ Assessment session closed cleanly. You may now close this browser tab.');
-      window.location.reload();
+    this.container.querySelector('#exit-fullscreen-close-tab-btn')?.addEventListener('click', () => {
+      closeExamTab();
     });
 
     // Star rating click handler
@@ -899,13 +901,42 @@ export class CandidatePortalModule {
       const textInput = this.container.querySelector('#feedback-text') as HTMLTextAreaElement;
       const text = textInput ? textInput.value.trim() : this.feedbackDraft.trim();
       submitBtn.setAttribute('disabled', 'true');
-      store.saveCandidateFeedback(this.selectedRating, text).then(() => {
-        this.renderCompletionScreen();
-      }).catch(() => {
-        submitBtn.removeAttribute('disabled');
-      });
+      store.finishAndClose(this.selectedRating, text);
+      closeExamTab();
     });
   }
+}
+
+function codingNotes(question: { type?: string; constraints?: string; ioFormat?: string }): string {
+  if (question.type !== 'coding' && question.type !== 'sql') return '';
+  const constraints = (question.constraints || '').trim();
+  const ioFormat = (question.ioFormat || '').trim();
+  if (!constraints && !ioFormat) return '';
+  const block = (label: string, text: string) => text ? `
+    <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+      <p class="text-[10px] font-bold uppercase tracking-wider text-slate-400">${label}</p>
+      <p class="text-xs text-slate-200 mt-1 whitespace-pre-line">${escHtml(text)}</p>
+    </div>` : '';
+  return `<div class="mt-4 space-y-2">${block('Constraints', constraints)}${block('Input / Output format', ioFormat)}</div>`;
+}
+
+function escHtml(value: string): string {
+  return value.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string));
+}
+
+function closeExamTab() {
+  try {
+    sessionStorage.removeItem('confered.candidateToken');
+    sessionStorage.removeItem('confered.examSnapshot');
+  } catch {
+    /* private browsing */
+  }
+  if (document.fullscreenElement && document.exitFullscreen) {
+    void document.exitFullscreen().catch(() => undefined);
+  }
+  // A click can close this tab once the page replaces itself.
+  window.open('', '_self');
+  window.close();
 }
 
 export function requestExamFullscreen() {

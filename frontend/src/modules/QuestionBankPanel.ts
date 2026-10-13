@@ -1,7 +1,9 @@
 import { CsvExporterService } from '../services/csvExporter';
 import { ApiError } from '../services/authApi';
 import { BulkQuestionImportResult, JobItem, JobRoleItem, recruiterApi } from '../services/recruiterApi';
-import { Question, QuestionCategory, Section } from '../types';
+import { CODING_LANGUAGES, defaultStarter } from '../services/starterCode';
+import { listedInputs } from '../services/testInputs';
+import { LanguageStarter, Question, QuestionCategory, Section } from '../types';
 
 const SECTIONS = ['Quantitative Aptitude', 'Logical Reasoning', 'English', 'Technical'];
 const CATEGORIES: { label: string; type: Question['type'] }[] = [
@@ -28,6 +30,8 @@ export class QuestionBankPanel {
   private filterJobId = '';
   private loading = true;
   private error = '';
+  private starterDraft: Record<string, LanguageStarter> = {};
+  private starterLang = 'python';
 
   constructor(container: HTMLElement, scope?: { jobId: string; jobTitle?: string }) {
     this.container = container;
@@ -333,7 +337,7 @@ export class QuestionBankPanel {
 
     host.innerHTML = `
       <div class="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4">
-        <div class="glass-panel w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-3xl border border-slate-800 p-6 space-y-5">
+        <div class="glass-panel w-full max-w-3xl max-h-[90vh] overflow-y-auto rounded-3xl border border-slate-800 p-6 space-y-5">
           <div class="flex items-center justify-between border-b border-slate-800 pb-4">
             <h3 class="text-lg font-extrabold text-white">${isEdit ? 'Modify Question' : 'Create Question'}</h3>
             <button id="close-q-modal-btn" class="text-slate-400 hover:text-white font-bold">✕</button>
@@ -346,6 +350,10 @@ export class QuestionBankPanel {
             <div>
               <label class="block font-semibold text-slate-300 mb-1">Stem / Content</label>
               <textarea id="q-content" rows="3" required class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white">${esc(q?.content || '')}</textarea>
+            </div>
+            <div>
+              <label class="block font-semibold text-slate-300 mb-1">Explanation</label>
+              <textarea id="q-explanation" rows="3" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white" placeholder="Why this answer is correct. Candidates do not see this during the exam.">${esc(q?.explanation || '')}</textarea>
             </div>
             <div class="grid grid-cols-2 gap-4">
               <div>
@@ -416,7 +424,18 @@ export class QuestionBankPanel {
                 <label class="block font-semibold text-slate-300 mb-1">I/O format</label>
                 <textarea id="q-io" rows="2" class="glass-input w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white">${esc(q?.ioFormat || '')}</textarea>
               </div>
+              <div id="starter-block" class="space-y-2">
+                <p class="font-semibold text-slate-300">Starter code</p>
+                <p class="text-[11px] text-slate-500">Each language opens with its own syntax. The candidate writes between the two blocks, and both blocks stay locked. Edit a language, or clear both boxes to leave it unlocked.</p>
+                <div id="starter-tabs" class="flex flex-wrap gap-1.5"></div>
+                <label class="block font-semibold text-slate-400">Code before (locked)</label>
+                <textarea id="starter-before" rows="8" class="glass-input w-full px-3 py-2 rounded-xl border border-slate-700 bg-slate-950 text-white font-mono" spellcheck="false"></textarea>
+                <p class="text-[10px] text-blue-300">Candidate writes here</p>
+                <label class="block font-semibold text-slate-400">Code after (locked)</label>
+                <textarea id="starter-after" rows="8" class="glass-input w-full px-3 py-2 rounded-xl border border-slate-700 bg-slate-950 text-white font-mono" spellcheck="false"></textarea>
+              </div>
               <p class="font-semibold text-slate-300">Test cases (include ≥1 hidden for publish)</p>
+              <p class="text-[11px] text-slate-500">One test case can hold Input 1, Input 2, and more. The program receives them as separate lines, in that order. Shift+Enter adds a line inside one input.</p>
               <div id="tc-list" class="space-y-2">
                 ${cases.map((c, i) => tcRow(c, i)).join('')}
               </div>
@@ -457,6 +476,7 @@ export class QuestionBankPanel {
       const showOpts = t === 'mcq' || t === 'msq' || t === 'drag_drop';
       host.querySelector('#panel-mcq')?.classList.toggle('hidden', !showOpts);
       host.querySelector('#panel-coding')?.classList.toggle('hidden', !(t === 'coding' || t === 'sql'));
+      host.querySelector('#starter-block')?.classList.toggle('hidden', t !== 'coding');
       host.querySelector('#panel-essay')?.classList.toggle('hidden', t !== 'essay');
       host.querySelector('#drag-hint')?.classList.toggle('hidden', t !== 'drag_drop');
       const label = host.querySelector('#opts-label');
@@ -467,6 +487,20 @@ export class QuestionBankPanel {
     };
     host.querySelector('#q-type')?.addEventListener('change', syncPanels);
     syncPanels();
+    this.mountStarterEditor(host, q);
+    host.querySelector('#q-form')?.addEventListener('keydown', event => {
+      const keyEvent = event as KeyboardEvent;
+      const target = keyEvent.target;
+      if (!(target instanceof HTMLTextAreaElement)) return;
+      if (!target.classList.contains('tc-in') && !target.classList.contains('tc-out')) return;
+      if (keyEvent.key === 'Enter' && keyEvent.shiftKey) {
+        keyEvent.preventDefault();
+        const start = target.selectionStart;
+        const end = target.selectionEnd;
+        target.value = `${target.value.slice(0, start)}\n${target.value.slice(end)}`;
+        target.selectionStart = target.selectionEnd = start + 1;
+      }
+    });
     const jobSel = host.querySelector('#q-job') as HTMLSelectElement | null;
     jobSel?.addEventListener('change', () => { void this.fillSections(host, q); });
     void this.fillSections(host, q);
@@ -481,8 +515,26 @@ export class QuestionBankPanel {
       const list = host.querySelector('#tc-list');
       if (!list) return;
       list.insertAdjacentHTML('beforeend', tcRow({
-        id: `tc-${Date.now()}`, input: '', expectedOutput: '', isHidden: true, weight: 1,
+        id: `tc-${Date.now()}`, input: '', inputs: [''], expectedOutput: '', isHidden: true, weight: 1,
       }, list.children.length));
+    });
+    host.querySelector('#tc-list')?.addEventListener('click', event => {
+      const target = event.target as HTMLElement;
+      const add = target.closest('.add-tc-input');
+      if (add) {
+        const box = add.closest('[data-tc-row]')?.querySelector('.tc-inputs');
+        if (!box) return;
+        box.insertAdjacentHTML('beforeend', tcInputSlot('', box.querySelectorAll('.tc-input-slot').length));
+        return;
+      }
+      const remove = target.closest('.remove-tc-input');
+      const slot = remove?.closest('.tc-input-slot');
+      const box = slot?.parentElement;
+      if (!slot || !box || box.querySelectorAll('.tc-input-slot').length < 2) return;
+      slot.remove();
+      box.querySelectorAll('.tc-input-label').forEach((label, index) => {
+        label.textContent = `Input ${index + 1}`;
+      });
     });
 
     host.querySelector('#q-form')?.addEventListener('submit', e => {
@@ -512,6 +564,54 @@ export class QuestionBankPanel {
     }
   }
 
+  private flushStarterFields(host: HTMLElement) {
+    const before = host.querySelector('#starter-before') as HTMLTextAreaElement | null;
+    const after = host.querySelector('#starter-after') as HTMLTextAreaElement | null;
+    if (!before || !after) return;
+    this.starterDraft[this.starterLang] = { before: before.value, after: after.value };
+  }
+
+  private mountStarterEditor(host: HTMLElement, q?: Question) {
+    this.starterDraft = {};
+    CODING_LANGUAGES.forEach(lang => {
+      const raw = q?.sampleCode?.[lang.id];
+      const fallback = defaultStarter(lang.id);
+      if (raw && typeof raw === 'object' && ((raw.before || '').trim() || (raw.after || '').trim())) {
+        this.starterDraft[lang.id] = { before: raw.before || '', after: raw.after || '' };
+      } else if (typeof raw === 'string' && raw.trim()) {
+        this.starterDraft[lang.id] = { before: raw, after: '' };
+      } else {
+        this.starterDraft[lang.id] = fallback;
+      }
+    });
+    this.starterLang = q?.language && this.starterDraft[q.language] ? q.language : 'python';
+    const tabs = host.querySelector('#starter-tabs');
+    const before = host.querySelector('#starter-before') as HTMLTextAreaElement | null;
+    const after = host.querySelector('#starter-after') as HTMLTextAreaElement | null;
+    const paintTabs = () => {
+      if (!tabs) return;
+      tabs.innerHTML = CODING_LANGUAGES.map(lang => `
+        <button type="button" data-starter-lang="${lang.id}" class="px-2 py-1 rounded-lg text-[10px] font-bold border ${
+          this.starterLang === lang.id ? 'bg-blue-600 text-white border-blue-500' : 'bg-slate-900 text-slate-400 border-slate-700'
+        }">${esc(lang.label.split(' ')[0])}</button>
+      `).join('');
+      tabs.querySelectorAll<HTMLButtonElement>('[data-starter-lang]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          this.flushStarterFields(host);
+          this.starterLang = btn.getAttribute('data-starter-lang') || 'python';
+          const parts = this.starterDraft[this.starterLang] || defaultStarter(this.starterLang);
+          if (before) before.value = parts.before;
+          if (after) after.value = parts.after;
+          paintTabs();
+        });
+      });
+    };
+    const current = this.starterDraft[this.starterLang] || { before: '', after: '' };
+    if (before) before.value = current.before;
+    if (after) after.value = current.after;
+    paintTabs();
+  }
+
   private async saveQuestion(q: Question | undefined, host: HTMLElement, close: () => void) {
     const type = (host.querySelector('#q-type') as HTMLSelectElement).value as Question['type'];
     const sectionCategory = (host.querySelector('#q-cat') as HTMLSelectElement).value;
@@ -529,6 +629,7 @@ export class QuestionBankPanel {
       sectionId: chosenSection,
       jobRole: this.jobs.find(j => j.id === chosenJob)?.title || null,
       stemFormat: (host.querySelector('#q-stem') as HTMLSelectElement).value,
+      explanation: (host.querySelector('#q-explanation') as HTMLTextAreaElement)?.value || '',
       tags: q?.tags || [],
       status: 'published',
     };
@@ -554,13 +655,26 @@ export class QuestionBankPanel {
     if (type === 'coding' || type === 'sql') {
       body.constraints = (host.querySelector('#q-constraints') as HTMLTextAreaElement)?.value || '';
       body.ioFormat = (host.querySelector('#q-io') as HTMLTextAreaElement)?.value || '';
+      if (type === 'coding') {
+        this.flushStarterFields(host);
+        const sampleCode: Record<string, LanguageStarter> = {};
+        Object.entries(this.starterDraft).forEach(([lang, parts]) => {
+          if ((parts.before || '').trim() || (parts.after || '').trim()) sampleCode[lang] = parts;
+        });
+        body.sampleCode = sampleCode;
+        body.language = this.starterLang;
+      }
       const testCases: unknown[] = [];
       host.querySelectorAll('[data-tc-row]').forEach(row => {
         const id = (row as HTMLElement).getAttribute('data-tc-row') || '';
+        const inputs = Array.from(row.querySelectorAll('.tc-in')).map(
+          el => (el as HTMLTextAreaElement).value,
+        );
         testCases.push({
           id,
-          input: (row.querySelector('.tc-in') as HTMLInputElement).value,
-          expectedOutput: (row.querySelector('.tc-out') as HTMLInputElement).value,
+          inputs: inputs.length ? inputs : [''],
+          input: (inputs.length ? inputs : ['']).join('\n'),
+          expectedOutput: (row.querySelector('.tc-out') as HTMLTextAreaElement).value,
           isHidden: (row.querySelector('.tc-hidden') as HTMLInputElement).checked,
           weight: parseInt((row.querySelector('.tc-weight') as HTMLInputElement).value, 10) || 1,
         });
@@ -712,10 +826,27 @@ const optionRow = (id: string, text: string, correct: boolean, _i: number, dragM
     <button type="button" class="text-slate-500 hover:text-red-400 font-bold px-1" onclick="this.closest('[data-opt-row]')?.remove()" title="Remove">×</button>
   </div>`;
 
-const tcRow = (c: { id: string; input: string; expectedOutput: string; isHidden: boolean; weight: number }, _i: number) => `
-  <div data-tc-row="${esc(c.id)}" class="grid grid-cols-12 gap-2 items-center p-2 rounded-lg bg-slate-950 border border-slate-800">
-    <input class="tc-in col-span-4 glass-input px-2 py-1.5 rounded-lg border border-slate-700 bg-slate-900 text-white" value="${esc(c.input)}" placeholder="Input" />
-    <input class="tc-out col-span-4 glass-input px-2 py-1.5 rounded-lg border border-slate-700 bg-slate-900 text-white" value="${esc(c.expectedOutput)}" placeholder="Expected" />
-    <label class="col-span-2 flex items-center gap-1 text-slate-400"><input type="checkbox" class="tc-hidden" ${c.isHidden ? 'checked' : ''} /> Hidden</label>
-    <input type="number" class="tc-weight col-span-2 glass-input px-2 py-1.5 rounded-lg border border-slate-700 bg-slate-900 text-white" value="${c.weight}" title="Weight" />
+const tcInputSlot = (value: string, index: number) => `
+  <div class="tc-input-slot flex items-start gap-2">
+    <span class="tc-input-label w-16 shrink-0 pt-2 text-[10px] font-bold text-slate-400">Input ${index + 1}</span>
+    <textarea class="tc-in flex-1 glass-input px-2 py-1.5 rounded-lg border border-slate-700 bg-slate-900 text-white font-mono whitespace-pre" rows="2" placeholder="Value for this input">${esc(value)}</textarea>
+    <button type="button" class="remove-tc-input text-slate-500 hover:text-red-400 font-bold px-1 pt-1" title="Remove this input">×</button>
+  </div>`;
+
+const tcRow = (c: { id: string; input: string; inputs?: string[]; expectedOutput: string; isHidden: boolean; weight: number }, _i: number) => `
+  <div data-tc-row="${esc(c.id)}" class="space-y-2 p-3 rounded-lg bg-slate-950 border border-slate-800">
+    <div class="flex items-center justify-between">
+      <span class="text-[11px] font-bold text-slate-300">Test case ${_i + 1}</span>
+      <button type="button" class="text-slate-500 hover:text-red-400 font-bold text-xs" onclick="this.closest('[data-tc-row]')?.remove()">Remove case</button>
+    </div>
+    <div class="tc-inputs space-y-2">
+      ${listedInputs(c).map((value, index) => tcInputSlot(value, index)).join('')}
+    </div>
+    <button type="button" class="add-tc-input text-blue-400 text-[11px] font-bold">+ Add input</button>
+    <label class="block text-[10px] font-bold text-slate-400">Expected output</label>
+    <textarea class="tc-out w-full glass-input px-2 py-1.5 rounded-lg border border-slate-700 bg-slate-900 text-white font-mono whitespace-pre" rows="2" placeholder="Expected">${esc(c.expectedOutput)}</textarea>
+    <div class="flex items-center gap-3">
+      <label class="flex items-center gap-1 text-slate-400 text-xs"><input type="checkbox" class="tc-hidden" ${c.isHidden ? 'checked' : ''} /> Hidden</label>
+      <input type="number" class="tc-weight w-20 glass-input px-2 py-1.5 rounded-lg border border-slate-700 bg-slate-900 text-white" value="${c.weight}" title="Weight" />
+    </div>
   </div>`;

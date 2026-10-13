@@ -466,6 +466,7 @@ export class RecruiterPortalModule {
       if (!email) return alert('Please enter the candidate email address.');
       if (!assessmentId) return alert('Please select a job.');
       sendBtn.disabled = true;
+      sendBtn.textContent = 'Sending invitation…';
       try {
         const invite = await authApi.createInvite({ name, email, assessmentId, expiresInHours: 48 });
         EmailService.recordInvite(name, email, invite.link, invite.devOtp, {
@@ -476,13 +477,41 @@ export class RecruiterPortalModule {
         const box = host.querySelector('#dispatch-output-box') as HTMLElement;
         const msg = host.querySelector('#dispatch-msg-text') as HTMLElement;
         box?.classList.remove('hidden');
+        const devNote = invite.devOtp
+          ? ` <span class="text-amber-300">(DEV OTP: <strong>${esc(invite.devOtp)}</strong>)</span>`
+          : '';
         if (msg) {
-          msg.innerHTML = `Invitation emailed to <strong>${esc(invite.otpDestination)}</strong>.${invite.devOtp ? ` <span class="text-amber-300">(DEV OTP: <strong>${esc(invite.devOtp)}</strong>)</span>` : ''}`;
+          msg.innerHTML = `Sending the invitation to <strong>${esc(invite.otpDestination)}</strong>…${devNote}`;
         }
-        sendBtn.textContent = '✓ Invitation dispatched';
+        sendBtn.textContent = '✓ Invitation created';
+        const deadline = Date.now() + 20000;
+        while (Date.now() < deadline && msg) {
+          await new Promise(resolve => window.setTimeout(resolve, 1000));
+          let delivery: { deliveryStatus: string; message: string };
+          try {
+            delivery = await authApi.inviteDelivery(invite.inviteId);
+          } catch {
+            continue;
+          }
+          if (delivery.deliveryStatus === 'SENT') {
+            msg.innerHTML = `Invitation emailed to <strong>${esc(invite.otpDestination)}</strong>, the address entered above. Check that inbox, then Spam and Promotions.${devNote}`;
+            sendBtn.textContent = '✓ Invitation emailed';
+            break;
+          }
+          if (delivery.deliveryStatus === 'FAILED') {
+            msg.innerHTML = `The invitation was saved, but the email was not delivered. ${esc(delivery.message || 'Check System Admin email settings.')}`;
+            sendBtn.textContent = 'Email failed';
+            sendBtn.disabled = false;
+            break;
+          }
+        }
+        if (msg && sendBtn.textContent === '✓ Invitation created') {
+          msg.innerHTML = `The invitation is saved for <strong>${esc(invite.otpDestination)}</strong>. The email is still going out — check the inbox, then Spam and Promotions.${devNote}`;
+        }
       } catch (e) {
         alert(e instanceof ApiError ? e.message : 'Invite failed.');
         sendBtn.disabled = false;
+        sendBtn.textContent = 'Send invitation';
       }
     });
   }

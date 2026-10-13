@@ -205,6 +205,7 @@ def question_out(q: Question) -> Dict[str, Any]:
         "timeLimitMs": meta.get("time_limit_ms"),
         "memoryLimitKb": meta.get("memory_limit_kb"),
         "rubric": q.rubric,
+        "explanation": q.explanation or "",
         "status": q.status or "published",
     }
 
@@ -217,7 +218,7 @@ def apply_question_fields(q: Question, body: Dict[str, Any]) -> None:
         "difficulty": "difficulty", "points": "points", "category": "category", "tags": "tags",
         "sectionCategory": "section_category", "jobRole": "job_role",
         "selectionMode": "selection_mode",
-        "stemFormat": "stem_format", "rubric": "rubric", "status": "status",
+        "stemFormat": "stem_format", "rubric": "rubric", "explanation": "explanation", "status": "status",
     }
     for src, dest in mapping.items():
         if src not in body:

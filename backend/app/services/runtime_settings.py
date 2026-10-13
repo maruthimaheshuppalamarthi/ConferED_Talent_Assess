@@ -40,18 +40,21 @@ def _snapshot() -> Dict[str, Any]:
     global _raw, _loaded_at
     if _raw is not None and time.monotonic() - _loaded_at <= CACHE_SECONDS:
         return _raw
-    with _lock:
-        if _raw is not None and time.monotonic() - _loaded_at <= CACHE_SECONDS:
-            return _raw
-        try:
-            _raw = _fetch()
-            _loaded_at = time.monotonic()
-        except Exception:
-            logger.exception("Could not read system settings; using the last known values")
+    # Fetch outside the lock. Holding it across a slow database call made every
+    # other sign-in wait behind that one query.
+    try:
+        fetched = _fetch()
+    except Exception:
+        logger.exception("Could not read system settings; using the last known values")
+        with _lock:
             if _raw is None:
                 _raw = {}
-            _loaded_at = time.monotonic() - CACHE_SECONDS + _RETRY_AFTER_FAILURE  # retry shortly
-        return _raw
+            _loaded_at = time.monotonic() - CACHE_SECONDS + _RETRY_AFTER_FAILURE
+            return dict(_raw)
+    with _lock:
+        _raw = fetched
+        _loaded_at = time.monotonic()
+        return dict(_raw)
 
 
 def invalidate() -> None:

@@ -9,6 +9,9 @@ interface LiveItem {
   email: string;
   examTitle: string;
   timeLeftSeconds: number;
+  examStarted: boolean;
+  /** Local deadline so the badge counts down between server refreshes. */
+  deadlineMs: number | null;
   violations: number;
   lastEvent: string;
 }
@@ -23,15 +26,29 @@ function clock(seconds: number): string {
   return `${String(minutes).padStart(2, '0')}:${String(rest).padStart(2, '0')}`;
 }
 
+function timeLabel(item: LiveItem): string {
+  if (!item.examStarted) return 'Not started';
+  const left = item.deadlineMs == null
+    ? item.timeLeftSeconds
+    : Math.max(0, Math.round((item.deadlineMs - Date.now()) / 1000));
+  return `Time left ${clock(left)}`;
+}
+
 export class LiveMonitorPortalModule {
+  private static current: LiveMonitorPortalModule | null = null;
   private container: HTMLElement;
   private items: LiveItem[] = [];
   private listening: LiveItem | null = null;
   private chatOpen = false;
   private timer: number | null = null;
+  private tickTimer: number | null = null;
   private stopWatch: (() => void) | null = null;
 
   constructor(container: HTMLElement) {
+    if (LiveMonitorPortalModule.current && LiveMonitorPortalModule.current !== this) {
+      LiveMonitorPortalModule.current.stop();
+    }
+    LiveMonitorPortalModule.current = this;
     this.container = container;
   }
 
@@ -51,6 +68,7 @@ export class LiveMonitorPortalModule {
     `;
     this.load().catch(() => this.paint('Could not load live sessions.'));
     if (!this.timer) this.timer = window.setInterval(() => this.load().catch(() => undefined), 5000);
+    if (!this.tickTimer) this.tickTimer = window.setInterval(() => this.tickClocks(), 1000);
     this.stopWatch?.();
     this.stopWatch = onProctorUpdate(() => { this.load().catch(() => undefined); });
   }
@@ -58,15 +76,28 @@ export class LiveMonitorPortalModule {
   private stop() {
     if (this.timer) window.clearInterval(this.timer);
     this.timer = null;
+    if (this.tickTimer) window.clearInterval(this.tickTimer);
+    this.tickTimer = null;
     this.stopWatch?.();
     this.stopWatch = null;
     setListening('');
   }
 
+  private tickClocks() {
+    this.container.querySelectorAll<HTMLElement>('[data-clock]').forEach(node => {
+      const id = node.getAttribute('data-clock') || '';
+      const item = this.items.find(row => row.id === id);
+      if (item) node.textContent = timeLabel(item);
+    });
+  }
+
   private async load() {
     const data = await authApi.fetchJson<{ items: LiveItem[] }>('/proctor/live', 'GET', undefined, 'staff');
+    const now = Date.now();
     this.items = data.items.map(item => ({
       ...item,
+      examStarted: Boolean(item.examStarted),
+      deadlineMs: item.examStarted ? now + Math.max(0, item.timeLeftSeconds) * 1000 : null,
       violations: Math.max(item.violations, violationCounts[item.id] || 0),
     }));
     this.paint();
@@ -141,7 +172,7 @@ export class LiveMonitorPortalModule {
             : `<img data-live-frame="${item.id}" alt="" class="absolute inset-0 w-full h-full object-cover hidden" /><div class="absolute inset-0 flex items-center justify-center text-slate-500 text-xs">Waiting for camera</div>`}
           <div class="absolute top-2 left-2 text-[10px] font-bold bg-slate-950/80 text-white px-2 py-0.5 rounded">${escapeHtml(item.examTitle || 'Assessment')}</div>
           <div class="absolute bottom-2 left-2 right-2 flex justify-between text-[11px] font-mono text-white">
-            <span class="bg-slate-950/80 px-2 py-0.5 rounded">Time left ${clock(item.timeLeftSeconds)}</span>
+            <span data-clock="${item.id}" class="bg-slate-950/80 px-2 py-0.5 rounded">${timeLabel(item)}</span>
             <span class="bg-red-950/90 text-red-200 px-2 py-0.5 rounded">Violations ${violations}</span>
           </div>
         </div>
@@ -163,7 +194,7 @@ export class LiveMonitorPortalModule {
           <div class="flex items-start justify-between gap-3">
             <div>
               <h2 class="text-lg font-bold text-white">${escapeHtml(item.name)}</h2>
-              <p class="text-xs text-slate-400">${escapeHtml(item.examTitle || 'Assessment')} • Time left ${clock(item.timeLeftSeconds)} • Violations ${Math.max(item.violations, violationCounts[item.id] || 0)}</p>
+              <p class="text-xs text-slate-400">${escapeHtml(item.examTitle || 'Assessment')} • <span data-clock="${item.id}">${timeLabel(item)}</span> • Violations ${Math.max(item.violations, violationCounts[item.id] || 0)}</p>
             </div>
             <button id="close-live-popup" class="px-3 py-1.5 rounded-lg bg-slate-800 text-xs text-slate-200" type="button">Close</button>
           </div>

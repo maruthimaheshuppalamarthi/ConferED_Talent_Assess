@@ -28,6 +28,7 @@ from app.models.auth import (
     Assessment, AssessmentSection, AssessmentSession, Candidate, CandidateInvite, OtpChallenge, Question, utcnow,
 )
 from app.services import assessment_scoring as scoring
+from app.services import code_exec
 from app.services import email as email_service
 from app.services import identity_bucket
 from app.services import recruiter_pipeline as pipeline
@@ -54,6 +55,21 @@ def speed_sample(_: dict = Depends(get_current_candidate)):
 
 class SubmitBody(BaseModel):
     answers: Dict[str, Any] = {}
+
+
+class ProgressBody(BaseModel):
+    sectionIndex: int = 0
+    questionIndex: int = 0
+    sectionEndsAt: Optional[str] = None
+    answers: Dict[str, Any] = {}
+    codeDrafts: Dict[str, Any] = {}
+    flagged: Optional[list] = None
+
+
+class RunBody(BaseModel):
+    questionId: str
+    language: str
+    code: str = ""
 
 
 class FeedbackBody(BaseModel):
@@ -217,6 +233,7 @@ def get_candidate_assessment(
             ],
         })
 
+    row = db.query(AssessmentSession).filter(AssessmentSession.invite_id == invite.id).first()
     return {
         "id": assessment.id,
         "title": assessment.title,
@@ -227,7 +244,102 @@ def get_candidate_assessment(
         "expiresAt": invite.expires_at.isoformat() if invite.expires_at else None,
         "sections": sections_out,
         "sessionId": session.get("id"),
+        "examStartedAt": row.exam_started_at.isoformat() if row and row.exam_started_at else None,
+        "serverNow": utcnow().isoformat(),
+        "progress": (row.progress if row else None) or None,
     }
+
+
+def _session_row(db: Session, invite: CandidateInvite) -> AssessmentSession:
+    pipeline.ensure_assessment_session(db, invite)
+    row = db.query(AssessmentSession).filter(AssessmentSession.invite_id == invite.id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Assessment session was not found.")
+    return row
+
+
+@router.post("/exam/start")
+def start_exam(cand: dict = Depends(get_current_candidate), db: Session = Depends(get_db)):
+    """Start the exam clock once. Later calls keep the original start."""
+    invite = db.get(CandidateInvite, cand["invite_id"])
+    if invite is None or invite.revoked or invite.expires_at < utcnow():
+        raise HTTPException(status_code=401, detail="This invitation link is invalid or has expired.")
+    row = _session_row(db, invite)
+    if row.completed_at is not None:
+        raise HTTPException(status_code=409, detail="This assessment is already submitted.")
+    if row.exam_started_at is None:
+        row.exam_started_at = utcnow()
+        db.commit()
+    return {
+        "examStartedAt": row.exam_started_at.isoformat(),
+        "serverNow": utcnow().isoformat(),
+    }
+
+
+def _trim_drafts(drafts: Dict[str, Any]) -> Dict[str, Any]:
+    cleaned: Dict[str, Any] = {}
+    for question_id, draft in list((drafts or {}).items())[:80]:
+        if not isinstance(draft, dict):
+            continue
+        files = draft.get("files") if isinstance(draft.get("files"), dict) else {}
+        kept = {}
+        for language, text in list(files.items())[:20]:
+            if isinstance(text, str):
+                kept[str(language)[:40]] = text[:100_000]
+        cleaned[str(question_id)[:80]] = {
+            "language": str(draft.get("language") or "")[:40],
+            "files": kept,
+        }
+    return cleaned
+
+
+@router.put("/progress")
+def save_progress(
+    body: ProgressBody,
+    cand: dict = Depends(get_current_candidate),
+    db: Session = Depends(get_db),
+):
+    """Remember answers and editor text so a refresh restores the attempt exactly."""
+    invite = db.get(CandidateInvite, cand["invite_id"])
+    if invite is None or invite.revoked or invite.expires_at < utcnow():
+        raise HTTPException(status_code=401, detail="This invitation link is invalid or has expired.")
+    row = _session_row(db, invite)
+    if row.completed_at is not None:
+        raise HTTPException(status_code=409, detail="This assessment is already submitted.")
+    if row.exam_started_at is None:
+        row.exam_started_at = utcnow()
+    row.progress = {
+        "sectionIndex": max(0, int(body.sectionIndex or 0)),
+        "questionIndex": max(0, int(body.questionIndex or 0)),
+        "sectionEndsAt": body.sectionEndsAt,
+        "answers": body.answers or {},
+        "codeDrafts": _trim_drafts(body.codeDrafts or {}),
+        "flagged": [str(item)[:80] for item in (body.flagged or [])][:200],
+        "updatedAt": utcnow().isoformat(),
+    }
+    db.commit()
+    return {"saved": True, "updatedAt": row.progress["updatedAt"]}
+
+
+@router.post("/run")
+def run_code(
+    body: RunBody,
+    cand: dict = Depends(get_current_candidate),
+    db: Session = Depends(get_db),
+):
+    """Compile and run the candidate's program against the question's test cases."""
+    invite = db.get(CandidateInvite, cand["invite_id"])
+    if invite is None or invite.revoked or invite.expires_at < utcnow():
+        raise HTTPException(status_code=401, detail="This invitation link is invalid or has expired.")
+    question = db.get(Question, (body.questionId or "").strip())
+    if question is None or question.type not in ("coding", "sql"):
+        raise HTTPException(status_code=404, detail="Coding question not found.")
+    session = _session_row(db, invite)
+    drawn = session.drawn_question_ids or {}
+    allowed = {qid for ids in drawn.values() if isinstance(ids, list) for qid in ids}
+    if allowed and question.id not in allowed:
+        raise HTTPException(status_code=403, detail="This question is not on your paper.")
+    return code_exec.execute(body.language or question.language or "python", body.code or "", question.test_cases or [])
 
 
 @router.post("/submit")

@@ -76,8 +76,22 @@ export class ApiError extends Error {
 
 type AuthMode = 'staff' | 'candidate' | 'none';
 
+const CANDIDATE_TOKEN_KEY = 'confered.candidateToken';
+
 let staffToken: string | null = null;
-let candidateToken: string | null = null;
+let candidateToken: string | null = (() => {
+  try { return sessionStorage.getItem(CANDIDATE_TOKEN_KEY); } catch { return null; }
+})();
+
+function setCandidateToken(token: string | null) {
+  candidateToken = token;
+  try {
+    if (token) sessionStorage.setItem(CANDIDATE_TOKEN_KEY, token);
+    else sessionStorage.removeItem(CANDIDATE_TOKEN_KEY);
+  } catch {
+    /* private browsing */
+  }
+}
 /** Portal the staff session was opened for; silent token refreshes go through that portal's API. */
 let activePortal: Portal = 'recruiter';
 let refreshInFlight: Promise<StaffSession | null> | null = null;
@@ -106,20 +120,23 @@ async function rawRequest(path: string, method: string, body: unknown, mode: Aut
       body: body !== undefined ? JSON.stringify(body) : undefined,
       signal: ctrl?.signal,
     });
-  } catch {
-    throw new ApiError(0, 'Cannot reach the server. Make sure the backend is running.');
+  } catch (err) {
+    const aborted = err instanceof DOMException && err.name === 'AbortError';
+    throw new ApiError(0, aborted
+      ? 'The server took too long to answer. Wait a moment and try again.'
+      : 'Cannot reach the server. Make sure the backend is running.');
   } finally {
     if (timer) window.clearTimeout(timer);
   }
 }
 
 /** Send a request; if the staff access token has expired, refresh it silently once and replay. */
-async function requestWithRefresh(path: string, method: string, body: unknown, mode: AuthMode): Promise<Response> {
-  let res = await rawRequest(path, method, body, mode);
+async function requestWithRefresh(path: string, method: string, body: unknown, mode: AuthMode, timeoutMs = 0): Promise<Response> {
+  let res = await rawRequest(path, method, body, mode, timeoutMs);
   if (res.status === 401 && mode === 'staff' && staffToken) {
     const session = await refreshSession(activePortal);
     if (session) {
-      res = await rawRequest(path, method, body, mode);
+      res = await rawRequest(path, method, body, mode, timeoutMs);
     } else {
       handleSessionExpired();
     }
@@ -127,8 +144,8 @@ async function requestWithRefresh(path: string, method: string, body: unknown, m
   return res;
 }
 
-async function request<T>(path: string, method = 'GET', body?: unknown, mode: AuthMode = 'none'): Promise<T> {
-  const res = await requestWithRefresh(path, method, body, mode);
+async function request<T>(path: string, method = 'GET', body?: unknown, mode: AuthMode = 'none', timeoutMs = 20000): Promise<T> {
+  const res = await requestWithRefresh(path, method, body, mode, timeoutMs);
   const data = await res.json().catch(() => null);
   if (!res.ok) throw new ApiError(res.status, errorMessage(data, res.status));
   return data as T;
@@ -225,9 +242,17 @@ export const authApi = {
     candidateId?: string;
   }) => request<InviteResult>('/recruiter/candidates/invites', 'POST', p, 'staff'),
 
+  inviteDelivery: (inviteId: string) =>
+    request<{ deliveryStatus: string; message: string }>(
+      `/recruiter/candidates/invites/${encodeURIComponent(inviteId)}/delivery`,
+      'GET',
+      undefined,
+      'staff',
+    ),
+
   async candidateVerify(inviteToken: string, otp: string): Promise<CandidateSession> {
     const session = await request<CandidateSession>('/candidate/verify', 'POST', { inviteToken, otp });
-    candidateToken = session.accessToken;
+    setCandidateToken(session.accessToken);
     return session;
   },
 
@@ -235,7 +260,42 @@ export const authApi = {
     request<OtpChallenge>('/candidate/resend-otp', 'POST', { inviteToken }),
 
   clearCandidateSession() {
-    candidateToken = null;
+    setCandidateToken(null);
+  },
+
+  /** Best-effort save while the tab is closing. Does not throw. */
+  postKeepalive(path: string, body: unknown, mode: AuthMode = 'candidate') {
+    const token = mode === 'staff' ? staffToken : mode === 'candidate' ? candidateToken : null;
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    try {
+      void fetch(`${API}${path}`, {
+        method: 'POST',
+        headers,
+        credentials: 'include',
+        body: JSON.stringify(body),
+        keepalive: true,
+      });
+    } catch {
+      /* the tab is closing; the request is already handed to the browser */
+    }
+  },
+
+  flushJson(path: string, body: unknown, mode: AuthMode = 'candidate') {
+    const token = mode === 'staff' ? staffToken : mode === 'candidate' ? candidateToken : null;
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    try {
+      void fetch(`${API}${path}`, {
+        method: 'PUT',
+        headers,
+        credentials: 'include',
+        body: JSON.stringify(body),
+        keepalive: true,
+      });
+    } catch {
+      /* the sessionStorage copy is already written */
+    }
   },
 
   /** Authenticated file download (e.g. the audit CSV): returns the file and the name the server suggested. */
