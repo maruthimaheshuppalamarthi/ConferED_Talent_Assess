@@ -1,4 +1,4 @@
-import { BRAND } from '../brand';
+import { BRAND, PORTAL_THEMES } from '../brand';
 import { flushCodingEditor, MonacoEditorComponent } from '../components/MonacoEditorComponent';
 import { ensureProctoringOverlay, teardownProctoringOverlay } from '../components/ProctoringOverlay';
 import { SystemCheckComponent } from '../components/SystemCheck';
@@ -131,52 +131,156 @@ export class CandidatePortalModule {
 
   private renderLanding() {
     const portals: Portal[] = ['admin', 'recruiter', 'proctor'];
+
     this.container.innerHTML = `
-      <section class="bg-white">
-        <div class="max-w-7xl mx-auto px-6 lg:px-10 py-16 lg:py-20 grid lg:grid-cols-2 gap-14 lg:gap-20 items-start">
-          <div class="space-y-5 lg:pt-4">
-            <p class="text-[13px] font-semibold tracking-[0.14em] uppercase text-slate-500">
-              ConferED Talent Assess
-            </p>
-            <h1 class="text-4xl sm:text-5xl font-extrabold tracking-tight leading-[1.15]" style="color:${BRAND.navy}">
-              Sign in to run assessments, hiring, and live proctoring.
+      <div class="relative overflow-hidden bg-slate-950 text-slate-100 transition-colors">
+        
+        <!-- Ambient SaaS Glow / Grid Backdrop -->
+        <div class="absolute inset-0 saas-hero-mesh pointer-events-none opacity-80"></div>
+        <div class="absolute inset-0 saas-grid-pattern opacity-40 pointer-events-none"></div>
+
+        <!-- Hero Section -->
+        <section class="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-12 pb-16 lg:pt-16 lg:pb-20">
+          <div class="text-center max-w-3xl mx-auto space-y-5">
+            <div class="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-semibold shadow-sm border bg-slate-900/80 border-blue-500/20 text-blue-300 backdrop-blur-md">
+              <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+              <span>ConferED Enterprise Talent Assessment & Proctoring</span>
+              <span class="opacity-40">•</span>
+              <span class="font-mono text-[11px] text-amber-500 font-bold">SOC-2 Type II</span>
+            </div>
+
+            <h1 class="text-3xl sm:text-5xl lg:text-6xl font-extrabold tracking-tight leading-[1.12]">
+              Intelligent Talent Assessment & <span class="bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 bg-clip-text text-transparent">Live Proctoring</span>
             </h1>
-            <p class="text-base sm:text-lg leading-relaxed text-slate-600 max-w-xl">
-              This is the staff workspace for <strong style="color:${BRAND.navy}">System Admin</strong>,
-              <strong style="color:${BRAND.navy}">Recruiter / HR</strong>, and
-              <strong style="color:${BRAND.navy}">Proctors</strong>.
-              Build exams, send invitations, and monitor live sessions.
+
+            <p class="text-base sm:text-lg leading-relaxed text-slate-300 max-w-2xl mx-auto">
+              A unified enterprise suite by <strong class="font-bold text-orange-500">ConferED</strong> for talent acquisition, university exams, and automated technical evaluations with real-time AI supervision.
             </p>
-            <p class="text-sm leading-relaxed text-slate-500 max-w-xl">
-              Candidates do not sign in here. They only open the personal invitation link sent to their email.
-            </p>
+
+            <!-- Trust / Feature Indicators -->
+            <div class="flex flex-wrap items-center justify-center gap-2.5 sm:gap-4 pt-2 text-xs font-medium text-slate-400">
+              <span class="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-slate-900/60 border border-slate-800">
+                <span>🛡️</span> 2FA Enforced IAM
+              </span>
+              <span class="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-slate-900/60 border border-slate-800">
+                <span>⚡</span> Automated Coding IDE
+              </span>
+              <span class="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-slate-900/60 border border-slate-800">
+                <span>👁️</span> Real-Time AI Monitor
+              </span>
+              <span class="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-slate-900/60 border border-slate-800">
+                <span>🔒</span> Zero-Trust Lockdown
+              </span>
+            </div>
           </div>
 
-          <div class="rounded-2xl border border-slate-200 bg-white p-7 space-y-5 shadow-sm">
-            <div>
-              <p class="text-[11px] font-bold tracking-[0.16em] uppercase text-slate-500">Staff portals</p>
-              <h2 class="text-2xl font-extrabold tracking-tight mt-1" style="color:${BRAND.navy}">Choose your workspace</h2>
-              <p class="text-sm mt-2 text-slate-600">Sign in with the account your System Admin created for you.</p>
+          <!-- The 3 Workspaces Grid -->
+          <div id="workspaces-section" class="mt-14 lg:mt-16">
+            <div class="flex flex-col sm:flex-row sm:items-end justify-between mb-8 gap-3">
+              <div>
+                <p class="text-xs font-bold uppercase tracking-[0.18em] text-blue-400">
+                  STAFF WORKSPACES
+                </p>
+                <h2 class="text-2xl sm:text-3xl font-extrabold tracking-tight mt-1 text-white">
+                  Choose your secure workspace
+                </h2>
+                <p class="text-xs sm:text-sm text-slate-400 mt-1">
+                  Sign in with your administrator-provisioned account. Multi-factor email OTP is required on all portals.
+                </p>
+              </div>
+              <div class="hidden sm:flex items-center gap-2 text-xs font-mono text-slate-400">
+                <span class="w-2 h-2 rounded-full bg-emerald-500"></span> 3 Workspaces Active
+              </div>
             </div>
-            <div class="space-y-2.5">
+
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 lg:gap-8">
               ${portals.map(p => {
-                const info = PORTAL_INFO[p];
+                const theme = PORTAL_THEMES[p];
                 return `
-                  <button type="button" data-portal="${p}" class="w-full text-left rounded-xl border border-slate-200 hover:border-slate-400 hover:bg-slate-50 transition-all px-4 py-3.5 flex items-start gap-3 bg-white">
-                    <span class="text-xl leading-none mt-0.5">${info.icon}</span>
-                    <span class="min-w-0 flex-1">
-                      <span class="block text-sm font-bold" style="color:${BRAND.navy}">${info.title}</span>
-                      <span class="block text-xs text-slate-500 mt-0.5">${info.blurb}</span>
-                    </span>
-                    <span class="shrink-0 text-xs font-semibold mt-1" style="color:${BRAND.navy}">Sign in →</span>
-                  </button>
+                  <div class="group relative rounded-3xl border transition-all duration-300 saas-card-hover flex flex-col justify-between p-7 bg-slate-900/80 border-slate-800 hover:border-slate-700 shadow-xl">
+                    
+                    <!-- Ambient Glow Accent on Hover -->
+                    <div class="absolute inset-0 rounded-3xl opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"
+                         style="background:radial-gradient(circle at top, ${theme.accentLight}, transparent 70%)"></div>
+
+                    <div class="relative space-y-4">
+                      <!-- Card Header & Icon -->
+                      <div class="flex items-center justify-between">
+                        <div class="w-12 h-12 rounded-2xl flex items-center justify-center text-2xl shadow-inner"
+                             style="background:${theme.accentLight}; border:1px solid ${theme.accentBorder}">
+                          ${theme.icon}
+                        </div>
+                        <span class="text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full font-mono"
+                              style="background:${theme.accentLight}; color:${theme.accentColor}; border:1px solid ${theme.accentBorder}">
+                          ${theme.badge}
+                        </span>
+                      </div>
+
+                      <div>
+                        <h3 class="text-xl font-bold tracking-tight text-white group-hover:text-blue-500 transition-colors">
+                          ${theme.name}
+                        </h3>
+                        <p class="text-xs text-slate-400 mt-2 leading-relaxed">
+                          ${theme.tagline}
+                        </p>
+                      </div>
+
+                      <!-- Key Capability Tags -->
+                      <div class="pt-2 flex flex-wrap gap-1.5">
+                        ${theme.features.map(f => `
+                          <span class="text-[10px] font-semibold px-2 py-0.5 rounded-md bg-slate-950/70 text-slate-300 border border-slate-800">
+                            ${f}
+                          </span>
+                        `).join('')}
+                      </div>
+                    </div>
+
+                    <!-- Card Action Button -->
+                    <div class="relative pt-6 mt-6 border-t border-slate-800">
+                      <button type="button" data-portal="${p}"
+                              class="w-full py-3 px-4 rounded-xl text-white font-bold text-xs tracking-wider transition-all duration-200 shadow-lg flex items-center justify-center gap-2 group-hover:shadow-xl active:scale-[0.98] bg-gradient-to-r ${theme.gradient} ${theme.hoverGradient}">
+                        <span>SIGN IN TO WORKSPACE</span>
+                        <span class="transition-transform group-hover:translate-x-1">➔</span>
+                      </button>
+                    </div>
+                  </div>
                 `;
               }).join('')}
             </div>
           </div>
-        </div>
-      </section>
+
+          <!-- Enterprise Features Highlights -->
+          <div class="mt-16 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+            <div class="p-6 rounded-2xl border transition-all bg-slate-900/50 border-slate-800/80">
+              <div class="text-2xl mb-3">💻</div>
+              <h4 class="text-sm font-bold tracking-tight text-white">Full Monaco Code IDE</h4>
+              <p class="text-xs text-slate-400 mt-1.5 leading-relaxed">Multi-language coding sandbox with automated test case evaluation and syntax assistance.</p>
+            </div>
+
+            <div class="p-6 rounded-2xl border transition-all bg-slate-900/50 border-slate-800/80">
+              <div class="text-2xl mb-3">👁️</div>
+              <h4 class="text-sm font-bold tracking-tight text-white">AI Vision Proctoring</h4>
+              <p class="text-xs text-slate-400 mt-1.5 leading-relaxed">Real-time face tracking, multi-person detection, tab-switch interception, and tamper logs.</p>
+            </div>
+
+            <div class="p-6 rounded-2xl border transition-all bg-slate-900/50 border-slate-800/80">
+              <div class="text-2xl mb-3">🎙️</div>
+              <h4 class="text-sm font-bold tracking-tight text-white">Live Voice Intercom</h4>
+              <p class="text-xs text-slate-400 mt-1.5 leading-relaxed">Direct two-way audio streaming allowing proctors to listen in and issue immediate verbal instructions.</p>
+            </div>
+
+            <div class="p-6 rounded-2xl border transition-all bg-slate-900/50 border-slate-800/80">
+              <div class="text-2xl mb-3">📊</div>
+              <h4 class="text-sm font-bold tracking-tight text-white">Dossier & Audit Trails</h4>
+              <p class="text-xs text-slate-400 mt-1.5 leading-relaxed">Candidate scoring metrics, violation timeline playback, and exportable PDF audit dossiers.</p>
+            </div>
+          </div>
+
+        </section>
+      </div>
     `;
+
+    // Attach Portal Buttons
     this.container.querySelectorAll('[data-portal]').forEach(btn => {
       btn.addEventListener('click', () => {
         const portal = (btn as HTMLElement).getAttribute('data-portal') as Portal;

@@ -41,9 +41,22 @@ export class AdminPortalModule {
     const info = TITLES[tab];
     this.container.innerHTML = `
       <div class="max-w-7xl mx-auto py-8 px-4 lg:px-8 space-y-6">
-        <div class="glass-panel p-4 rounded-3xl border border-slate-800">
-          <h1 class="text-xl font-extrabold text-white flex items-center gap-2"><span>${info.icon}</span> ${info.title}</h1>
-          <p class="text-xs text-slate-400 mt-0.5">${info.blurb}</p>
+        <div class="p-5 rounded-3xl border transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-4 glass-panel border-slate-800">
+          <div class="space-y-1">
+            <h1 class="text-xl font-extrabold flex items-center gap-2.5">
+              <span class="text-2xl">${info.icon}</span>
+              <span>${info.title}</span>
+            </h1>
+            <p class="text-xs text-slate-400 max-w-2xl">${info.blurb}</p>
+          </div>
+          <div class="flex items-center gap-2 shrink-0">
+            <span class="px-3 py-1 rounded-full text-[11px] font-mono font-bold bg-blue-500/10 text-blue-400 border border-blue-500/20 flex items-center gap-1.5">
+              <span class="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse"></span> Admin Console
+            </span>
+            <span class="px-3 py-1 rounded-full text-[11px] font-mono font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center gap-1.5">
+              <span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span> Healthy
+            </span>
+          </div>
         </div>
         <div id="admin-tab-content"></div>
       </div>`;
